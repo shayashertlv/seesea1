@@ -9,24 +9,28 @@ def _identity_H() -> np.ndarray:
     return np.eye(3, dtype=np.float32)
 
 
-# Simple temporal smoothing for homographies to reduce jitter
-_GMC_LAST_H: Optional[np.ndarray] = None
+class GMCSmoother:
+    """Stateful exponential smoother for homography matrices."""
 
-def _smooth_H(H: np.ndarray, alpha: float = 0.6) -> np.ndarray:
-    global _GMC_LAST_H
-    try:
-        Hc = H.astype(np.float32)
-        if _GMC_LAST_H is None:
-            _GMC_LAST_H = Hc
-            return Hc
-        # Exponential smoothing across the full matrix, keep H[2,2] normalized
-        Hs = (alpha * Hc + (1.0 - alpha) * _GMC_LAST_H).astype(np.float32)
-        if abs(float(Hs[2, 2])) > 1e-8:
-            Hs = Hs / float(Hs[2, 2])
-        _GMC_LAST_H = Hs
-        return Hs
-    except Exception:
-        return H.astype(np.float32)
+    def __init__(self) -> None:
+        self._last_H: Optional[np.ndarray] = None
+
+    def smooth(self, H: np.ndarray, alpha: float = 0.6) -> np.ndarray:
+        try:
+            Hc = H.astype(np.float32)
+            if self._last_H is None:
+                self._last_H = Hc
+                return Hc
+            Hs = (alpha * Hc + (1.0 - alpha) * self._last_H).astype(np.float32)
+            if abs(float(Hs[2, 2])) > 1e-8:
+                Hs = Hs / float(Hs[2, 2])
+            self._last_H = Hs
+            return Hs
+        except Exception:
+            return H.astype(np.float32)
+
+    def reset(self) -> None:
+        self._last_H = None
 
 
 def estimate_gmc(prev_gray: np.ndarray,
@@ -36,12 +40,14 @@ def estimate_gmc(prev_gray: np.ndarray,
                  nfeatures: int = 1000,
                  ransac_thresh: float = 3.0,
                  downscale: int = 1,
-                 mask_exclude_boxes: Optional[List[Tuple[float, float, float, float]]] = None
+                 mask_exclude_boxes: Optional[List[Tuple[float, float, float, float]]] = None,
+                 smoother: Optional["GMCSmoother"] = None
                  ) -> Tuple[np.ndarray, Dict[str, float]]:
     """
     Estimate global motion between prev_gray and curr_gray using feature matching and RANSAC homography.
     - Exclude borders and current detection boxes from keypoint regions via mask to focus on static background.
     Returns (H, stats) where H is 3x3 float32 homography (or identity on failure) and stats include match counts.
+    If ``smoother`` is provided, the homography is temporally smoothed before returning.
     Note: stats['ok'] is a coarse success score (1.0 on confident homography, 0.0 otherwise). Callers may log
     periodic GMC health heartbeats (e.g., ratio of 'ok' decisions) to diagnose stability over time.
     """
@@ -51,9 +57,15 @@ def estimate_gmc(prev_gray: np.ndarray,
         'inliers': 0.0,
         'ok': 0.0,
     }
+
+    def _apply_smoother(h: np.ndarray) -> np.ndarray:
+        h = h.astype(np.float32)
+        if smoother is not None:
+            return smoother.smooth(h)
+        return h
     try:
         if prev_gray is None or curr_gray is None:
-            return _identity_H(), stats
+            return _apply_smoother(_identity_H()), stats
         H_img, W_img = prev_gray.shape[:2]
         if downscale and downscale > 1:
             prev_small = cv2.resize(prev_gray, (W_img // downscale, H_img // downscale), interpolation=cv2.INTER_AREA)
@@ -102,7 +114,7 @@ def estimate_gmc(prev_gray: np.ndarray,
                     curr_bgr = curr_small
                 H, stats = raft.estimate(prev_bgr, curr_bgr, exclude_boxes=mask_exclude_boxes, downscale=downscale, ransac_thresh=ransac_thresh)  # type: ignore[arg-type]
                 if H is not None and isinstance(H, np.ndarray):
-                    return H.astype(np.float32), stats
+                    return _apply_smoother(H.astype(np.float32)), stats
             except Exception:
                 # Fall through to ORB/OFLOW
                 pass
@@ -111,12 +123,12 @@ def estimate_gmc(prev_gray: np.ndarray,
             kpts1, des1 = orb.detectAndCompute(prev_small, mask)
             kpts2, des2 = orb.detectAndCompute(curr_small, mask)
             if des1 is None or des2 is None or len(kpts1) == 0 or len(kpts2) == 0:
-                return _identity_H(), stats
+                return _apply_smoother(_identity_H()), stats
             bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
             matches = bf.match(des1, des2)
             stats['matches'] = float(len(matches))
             if len(matches) < 30:
-                return _identity_H(), stats
+                return _apply_smoother(_identity_H()), stats
             matches = sorted(matches, key=lambda x: x.distance)
             good = matches[: max(30, int(0.5 * len(matches)))]
             stats['good_matches'] = float(len(good))
@@ -124,13 +136,13 @@ def estimate_gmc(prev_gray: np.ndarray,
             pts2 = np.float32([kpts2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
             H, inliers = cv2.findHomography(pts1, pts2, cv2.RANSAC, ransacReprojThreshold=ransac_thresh)
             if H is None:
-                return _identity_H(), stats
+                return _apply_smoother(_identity_H()), stats
             inlier_count = int(inliers.sum()) if inliers is not None else 0
             stats['inliers'] = float(inlier_count)
             if inlier_count < 30:
-                return _identity_H(), stats
+                return _apply_smoother(_identity_H()), stats
             stats['ok'] = 1.0
-            return H.astype(np.float32), stats
+            return _apply_smoother(H.astype(np.float32)), stats
         elif method.lower() == 'oflow':
             # GPU/CPU Farnebäck optical flow → RANSAC homography
             try:
@@ -158,17 +170,17 @@ def estimate_gmc(prev_gray: np.ndarray,
                     pts1_s, pts2_s = pts1, pts2
                 H, inliers = cv2.findHomography(pts1_s, pts2_s, cv2.RANSAC, ransacReprojThreshold=ransac_thresh)
                 if H is None:
-                    return _identity_H(), stats
+                    return _apply_smoother(_identity_H()), stats
                 stats['ok'] = 1.0
                 stats['inliers'] = float(inliers.sum()) if inliers is not None else 0.0
-                return H.astype(np.float32), stats
+                return _apply_smoother(H.astype(np.float32)), stats
             except Exception:
-                return _identity_H(), stats
+                return _apply_smoother(_identity_H()), stats
         else:
             # Fallback: identity
-            return _identity_H(), stats
+            return _apply_smoother(_identity_H()), stats
     except Exception:
-        return _identity_H(), stats
+        return _apply_smoother(_identity_H()), stats
 
 
 def warp_point(cx: float, cy: float, H: Optional[np.ndarray]) -> Tuple[float, float]:

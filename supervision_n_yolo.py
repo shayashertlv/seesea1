@@ -9,11 +9,12 @@ from collections import deque
 
 # GMC & ReID pluggable backbones
 try:
-    from gmc import estimate_gmc, warp_box_xyxy, warp_point
+    from gmc import estimate_gmc, warp_box_xyxy, warp_point, GMCSmoother
 except Exception:
     estimate_gmc = None  # type: ignore
     warp_box_xyxy = None  # type: ignore
     warp_point = None  # type: ignore
+    GMCSmoother = None  # type: ignore
 
 # Optional modules (graceful)
 try:
@@ -3068,6 +3069,7 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
     frame_idx = -1
     # GMC state/stats
     prev_gray = None
+    gmc_smoother = GMCSmoother() if (estimate_gmc is not None and GMCSmoother is not None) else None
     gmc_used = 0
     gmc_skips = 0
     # Tracks per frame for MOT export (1-based frame index)
@@ -3345,6 +3347,8 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
         if estimate_gmc is not None:
             if prev_gray is None:
                 H_cam = np.eye(3, dtype=np.float32)
+                if gmc_smoother is not None:
+                    gmc_smoother.reset()
             else:
                 try:
                     # Exclude current boxes from keypoints to prefer background features
@@ -3357,7 +3361,8 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                         nfeatures=ORB_NFEATURES,
                         ransac_thresh=ORB_RANSAC_THRESH,
                         downscale=GMC_DOWNSCALE,
-                        mask_exclude_boxes=_boxes_for_mask
+                        mask_exclude_boxes=_boxes_for_mask,
+                        smoother=gmc_smoother
                     )
                     okv = 0.0
                     inr = 0.0
