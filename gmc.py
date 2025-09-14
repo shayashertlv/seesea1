@@ -91,18 +91,28 @@ def estimate_gmc(prev_gray: np.ndarray,
                 from gmc_raft import RAFTGMC  # type: ignore
                 raft = getattr(estimate_gmc, "_raft", None)
                 if raft is None:
-                    raft = RAFTGMC(device=("cuda" if (hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0) else "cpu"))
-                    estimate_gmc._raft = raft  # type: ignore[attr-defined]
-                # Convert gray to BGR for RAFT if needed
-                if prev_small.ndim == 2:
-                    prev_bgr = cv2.cvtColor(prev_small, cv2.COLOR_GRAY2BGR)
-                    curr_bgr = cv2.cvtColor(curr_small, cv2.COLOR_GRAY2BGR)
-                else:
-                    prev_bgr = prev_small
-                    curr_bgr = curr_small
-                H, stats = raft.estimate(prev_bgr, curr_bgr, exclude_boxes=mask_exclude_boxes, downscale=downscale, ransac_thresh=ransac_thresh)  # type: ignore[arg-type]
-                if H is not None and isinstance(H, np.ndarray):
-                    return H.astype(np.float32), stats
+                    raft = RAFTGMC(
+                        device=(
+                            "cuda" if (hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0) else "cpu"
+                        )
+                    )
+                if raft.ok:
+                    # Convert gray to BGR for RAFT if needed
+                    if prev_small.ndim == 2:
+                        prev_bgr = cv2.cvtColor(prev_small, cv2.COLOR_GRAY2BGR)
+                        curr_bgr = cv2.cvtColor(curr_small, cv2.COLOR_GRAY2BGR)
+                    else:
+                        prev_bgr = prev_small
+                        curr_bgr = curr_small
+                    try:
+                        H, stats = raft.estimate(prev_bgr, curr_bgr,
+                                                exclude_boxes=mask_exclude_boxes,
+                                                downscale=downscale,
+                                                ransac_thresh=ransac_thresh)  # type: ignore[arg-type]
+                        if H is not None and isinstance(H, np.ndarray):
+                            return H.astype(np.float32), stats
+                    except NotImplementedError:
+                        pass
             except Exception:
                 # Fall through to ORB/OFLOW
                 pass
