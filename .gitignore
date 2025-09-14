@@ -1,0 +1,10 @@
+.venv/
+captures/
+data/
+weights/
+*.pt
+*.pth
+*.onnx
+*.mp4
+*.mov
+*.mkv
