@@ -19,15 +19,12 @@ try:
 except Exception:
     HAS_OPENCLIP = False
 try:
-    import timm  # type: ignore
-    HAS_TIMM = True
-except Exception:
-    HAS_TIMM = False
-try:
     from PIL import Image  # type: ignore
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
+
+from reid_backbones import BACKBONE_LOADERS
 
 # Normalization tensors (CPU) hoisted to avoid per-call allocation
 if HAS_TORCH:
@@ -95,30 +92,11 @@ class ReIDExtractor:
                 self.device = torch.device("cpu")
         # Load backend with graceful fallbacks (no internet required)
         load_ok = False
-        # 1) Try requested backend
+        load_fn = BACKBONE_LOADERS.get(self.backend, BACKBONE_LOADERS.get("osnet"))
         try:
-            if self.backend == "osnet":
-                self._load_osnet()
+            if load_fn is not None:
+                load_fn(self)
                 load_ok = True
-            elif self.backend == "fastreid_r50":
-                self._load_fastreid_r50()
-                load_ok = True
-            elif self.backend == "dinov2_vits14":
-                try:
-                    self._load_dinov2_small()
-                    load_ok = True
-                except Exception:
-                    self._load_osnet(); load_ok = True
-            elif self.backend == "dinov2_vitl14":
-                self._load_dinov2_large(); load_ok = True
-            elif self.backend in ("clip_vitl14", "clip_vith14"):
-                self._load_openclip(self.backend); load_ok = True
-            elif self.backend == "fusion":
-                # requires both CLIP-L/14 and DINOv2-L/14
-                self._load_fusion()
-                load_ok = True
-            else:
-                self._load_osnet(); load_ok = True
         except Exception:
             load_ok = False
         # 2) If still not ok, final fallback to torchvision resnet50 with no weights (offline-safe)
@@ -141,157 +119,6 @@ class ReIDExtractor:
                 pass
         if not load_ok or (self.model is None and self.backend != "fusion"):
             raise RuntimeError("Failed to initialize any ReID backbone (torchvision/timm/osnet/open_clip)")
-
-    def _load_osnet(self):
-        self.is_vit_square = False
-        self.input_size = (256, 128)
-        model = None
-        try:
-            import torchreid  # type: ignore
-            model = torchreid.models.build_model('osnet_x1_0', num_classes=1, pretrained=True)  # type: ignore
-            if hasattr(model, 'classifier'):
-                model.classifier = torch.nn.Identity()
-        except Exception:
-            # Try torchvision osnet
-            try:
-                import torchvision
-                osnet = getattr(torchvision.models, 'osnet_x1_0', None)
-                if osnet is not None:
-                    model = osnet(pretrained=True)
-                    if hasattr(model, 'classifier'):
-                        model.classifier = torch.nn.Identity()
-                    elif hasattr(model, 'fc'):
-                        model.fc = torch.nn.Identity()
-            except Exception:
-                model = None
-        # Fallback to resnet50 features if osnet not available
-        if model is None:
-            try:
-                import torchvision
-                weights = getattr(torchvision.models, 'ResNet50_Weights', None)
-                if weights is not None:
-                    model = torchvision.models.resnet50(weights=weights.DEFAULT)
-                else:
-                    model = torchvision.models.resnet50(pretrained=True)
-                model.fc = torch.nn.Identity()
-                self.input_size = (224, 224)
-            except Exception:
-                model = None
-        if model is None:
-            raise RuntimeError("Failed to load OSNet/ResNet for ReID")
-        model.eval().to(self.device)
-        self.model = model
-        # Ensure fp16 is only used on CUDA and set once
-        if self.fp16 and self.device.type == "cuda":
-            self.model = self.model.half()
-
-    def _load_fastreid_r50(self):
-        self.is_vit_square = False
-        self.input_size = (256, 128)
-        try:
-            from fastreid.config import get_cfg  # type: ignore
-            from fastreid.modeling import build_model  # type: ignore
-            from fastreid.utils.checkpoint import Checkpointer  # type: ignore
-        except Exception as e:
-            raise RuntimeError("FastReID not installed") from e
-        cfg = get_cfg()
-        # BagTricks R50 default config; using built-in weights if available
-        cfg.merge_from_list([
-            'MODEL.BACKBONE.NAME', 'build_resnet_backbone',
-            'MODEL.HEADS.IN_FEAT', '2048',
-            'MODEL.META_ARCHITECTURE', 'Baseline',
-        ])
-        model = build_model(cfg)
-        model.eval().to(self.device)
-        # Attempt to load default weights if present via env
-        weights_path = os.getenv('FASTREID_R50_WEIGHTS', '')
-        try:
-            if weights_path and os.path.exists(weights_path):
-                Checkpointer(model).load(weights_path)  # type: ignore
-        except Exception:
-            pass
-        self.model = model
-        # Ensure fp16 is only used on CUDA and set once
-        if self.fp16 and self.device.type == "cuda":
-            self.model = self.model.half()
-
-    def _load_dinov2_small(self):
-        self.is_vit_square = True
-        self.input_size = (224, 224)
-        try:
-            import timm
-            model = timm.create_model('vit_small_patch14_dinov2.lvd142m', pretrained=True, num_classes=0)
-            model.eval().to(self.device)
-            self.model = model
-            if self.fp16 and self.device.type == "cuda":
-                self.model = self.model.half()
-        except Exception as e:
-            raise RuntimeError("Failed to load DINOv2 ViT-S/14 via timm") from e
-
-    def _load_dinov2_large(self):
-        self.is_vit_square = True
-        self.input_size = (224, 224)
-        last_err = None
-        try:
-            import timm
-            try:
-                model = timm.create_model('vit_large_patch14_dinov2.lvd142m', pretrained=True, num_classes=0)
-            except Exception as e1:
-                last_err = e1
-                model = timm.create_model('vit_large_patch14_dinov2', pretrained=True, num_classes=0)
-            model.eval().to(self.device)
-            self.model = model
-            if self.fp16 and self.device.type == "cuda":
-                self.model = self.model.half()
-        except Exception as e:
-            if last_err is None:
-                last_err = e
-            raise RuntimeError("Failed to load DINOv2 ViT-L/14 via timm") from last_err
-
-    def _load_openclip(self, kind: str = "clip_vitl14"):
-        self.is_vit_square = True
-        self.input_size = (224, 224)
-        if not HAS_OPENCLIP:
-            raise RuntimeError("open_clip not available")
-        model_name = 'ViT-L-14' if 'vitl' in kind or 'clip_vitl14' in kind else 'ViT-H-14'
-        try:
-            model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained="openai")  # type: ignore
-            model.to(self.device)
-            model.eval()
-            if self.fp16 and self.device.type == "cuda":
-                model = model.half()
-            self.model = model
-            self.clip_tf = preprocess
-        except Exception as e:
-            raise RuntimeError("Failed to load OpenCLIP model") from e
-
-    def _load_fusion(self):
-        # Load both CLIP-L/14 and DINOv2-L/14
-        self.is_vit_square = True
-        self.input_size = (224, 224)
-        self.model = None  # fusion uses self.model_clip and self.model_dino
-        # CLIP
-        if not HAS_OPENCLIP:
-            raise RuntimeError("open_clip not available for fusion")
-        try:
-            m_clip, _, preprocess = open_clip.create_model_and_transforms('ViT-L-14', pretrained="openai")  # type: ignore
-            m_clip.to(self.device); m_clip.eval()
-            if self.fp16 and self.device.type == "cuda":
-                m_clip = m_clip.half()
-            self.model_clip = m_clip
-            self.clip_tf = preprocess
-        except Exception as e:
-            raise RuntimeError("Failed to load CLIP-L/14 for fusion") from e
-        # DINOv2-L
-        try:
-            import timm
-            m_dino = timm.create_model('vit_large_patch14_dinov2.lvd142m', pretrained=True, num_classes=0)
-            m_dino.to(self.device); m_dino.eval()
-            if self.fp16 and self.device.type == "cuda":
-                m_dino = m_dino.half()
-            self.model_dino = m_dino
-        except Exception as e:
-            raise RuntimeError("Failed to load DINOv2-L/14 for fusion") from e
 
     def _preprocess(self, bgr: np.ndarray) -> torch.Tensor:
         # Convert BGR->RGB and resize appropriately (ImageNet normalization)

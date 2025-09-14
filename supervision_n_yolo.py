@@ -26,7 +26,7 @@ except Exception:
     CropSR = None  # type: ignore
 
 try:
-    from reid_backbones import ReIDExtractor as _PluggableReID
+    from reid_extractor import ReIDExtractor as _PluggableReID
 except Exception:
     _PluggableReID = None  # type: ignore
 
