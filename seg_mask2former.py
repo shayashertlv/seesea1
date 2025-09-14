@@ -1,6 +1,9 @@
 import numpy as np
 import cv2
+import logging
 from typing import List, Tuple, Optional
+
+logger = logging.getLogger(__name__)
 
 _logged = False
 
@@ -28,7 +31,7 @@ def infer_roi_masks(frame_bgr: np.ndarray,
             have_heavy = False
         if not have_heavy and not _logged:
             try:
-                print('[seg] Mask2Former not available; using GrabCut ROI fallback')
+                logger.warning('[seg] Mask2Former not available; using GrabCut ROI fallback')
                 _logged = True
             except Exception:
                 pass

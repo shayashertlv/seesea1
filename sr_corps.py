@@ -1,6 +1,9 @@
 import os
 import numpy as np
 import cv2
+import logging
+
+logger = logging.getLogger(__name__)
 
 class CropSR:
     def __init__(self, scale:int = 2):
@@ -45,7 +48,7 @@ class CropSR:
                 return out
             else:
                 if not self._warned:
-                    print('[sr] Real-ESRGAN unavailable; using bicubic fallback')
+                    logger.warning('[sr] Real-ESRGAN unavailable; using bicubic fallback')
                     self._warned = True
                 scale = max(2, int(round(float(min_side) / float(max(1, min(h, w))))))
                 new_w = int(w * scale)
