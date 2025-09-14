@@ -10,23 +10,52 @@ def _identity_H() -> np.ndarray:
 
 
 # Simple temporal smoothing for homographies to reduce jitter
-_GMC_LAST_H: Optional[np.ndarray] = None
+class GMCFilter:
+    """Stateful exponential smoothing for homography matrices."""
+
+    def __init__(self) -> None:
+        self._last_H: Optional[np.ndarray] = None
+
+    def reset(self) -> None:
+        """Reset the internal smoothing state."""
+        self._last_H = None
+
+    def smooth(self, H: np.ndarray, alpha: float = 0.6) -> np.ndarray:
+        """Return a temporally smoothed version of ``H``.
+
+        Parameters
+        ----------
+        H: np.ndarray
+            Incoming homography matrix.
+        alpha: float, default=0.6
+            Smoothing factor where higher is less smoothing.
+        """
+        try:
+            Hc = H.astype(np.float32)
+            if self._last_H is None:
+                self._last_H = Hc
+                return Hc
+            # Exponential smoothing across the full matrix, keep H[2,2] normalized
+            Hs = (alpha * Hc + (1.0 - alpha) * self._last_H).astype(np.float32)
+            if abs(float(Hs[2, 2])) > 1e-8:
+                Hs = Hs / float(Hs[2, 2])
+            self._last_H = Hs
+            return Hs
+        except Exception:
+            return H.astype(np.float32)
+
+
+_GMC_FILTER = GMCFilter()
+
 
 def _smooth_H(H: np.ndarray, alpha: float = 0.6) -> np.ndarray:
-    global _GMC_LAST_H
-    try:
-        Hc = H.astype(np.float32)
-        if _GMC_LAST_H is None:
-            _GMC_LAST_H = Hc
-            return Hc
-        # Exponential smoothing across the full matrix, keep H[2,2] normalized
-        Hs = (alpha * Hc + (1.0 - alpha) * _GMC_LAST_H).astype(np.float32)
-        if abs(float(Hs[2, 2])) > 1e-8:
-            Hs = Hs / float(Hs[2, 2])
-        _GMC_LAST_H = Hs
-        return Hs
-    except Exception:
-        return H.astype(np.float32)
+    """Legacy helper wrapping the default :class:`GMCFilter` instance."""
+    return _GMC_FILTER.smooth(H, alpha)
+
+
+def reset_gmc_smoothing() -> None:
+    """Reset the default GMC smoothing state."""
+    _GMC_FILTER.reset()
 
 
 def estimate_gmc(prev_gray: np.ndarray,

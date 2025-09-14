@@ -9,11 +9,14 @@ from collections import deque
 
 # GMC & ReID pluggable backbones
 try:
-    from gmc import estimate_gmc, warp_box_xyxy, warp_point
+    from gmc import estimate_gmc, warp_box_xyxy, warp_point, reset_gmc_smoothing
 except Exception:
     estimate_gmc = None  # type: ignore
     warp_box_xyxy = None  # type: ignore
     warp_point = None  # type: ignore
+
+    def reset_gmc_smoothing() -> None:  # type: ignore
+        pass
 
 # Optional modules (graceful)
 try:
@@ -3344,6 +3347,7 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
             curr_gray = None
         if estimate_gmc is not None:
             if prev_gray is None:
+                reset_gmc_smoothing()
                 H_cam = np.eye(3, dtype=np.float32)
             else:
                 try:
