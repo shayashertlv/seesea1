@@ -993,6 +993,18 @@ def _compute_hsv_hist(frame: np.ndarray, bbox: Tuple[float, float, float, float]
     roi = _safe_crop(frame, bbox)
     if roi is None:
         return None
+    if MASK_GUIDED_HIST and mask_roi is not None:
+        try:
+            if mask_roi.shape[:2] != roi.shape[:2]:
+                mask_roi = cv2.resize(mask_roi, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_NEAREST)
+            ys, xs = np.where(mask_roi > 0)
+            if xs.size > 0 and ys.size > 0:
+                x1, x2 = int(xs.min()), int(xs.max() + 1)
+                y1, y2 = int(ys.min()), int(ys.max() + 1)
+                roi = roi[y1:y2, x1:x2]
+                mask_roi = mask_roi[y1:y2, x1:x2]
+        except Exception:
+            pass
     # Optional board-aware focus
     try:
         if HIST_FOCUS == "lower":
@@ -2264,6 +2276,12 @@ def _apply_mask_to_crop(crop: Optional[np.ndarray], mask: Optional[np.ndarray]) 
     try:
         if crop.shape[:2] != mask.shape[:2]:
             mask = cv2.resize(mask, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST)
+        ys, xs = np.where(mask > 0)
+        if xs.size > 0 and ys.size > 0:
+            x1, x2 = int(xs.min()), int(xs.max() + 1)
+            y1, y2 = int(ys.min()), int(ys.max() + 1)
+            crop = crop[y1:y2, x1:x2]
+            mask = mask[y1:y2, x1:x2]
         out = crop.copy()
         out[mask == 0] = 0
         return out
@@ -2406,6 +2424,20 @@ def _compute_embeddings_for_dets(frame: np.ndarray,
                                  masks: Optional[List[Optional[np.ndarray]]] = None,
                                  force_builtin: bool = False
                                  ) -> List[Optional[np.ndarray]]:
+    # Ensure ROI masks are available when segmentation enabled
+    if SEG_ENABLE and boxes:
+        need_masks = (
+            masks is None or len(masks) != len(boxes) or any(m is None for m in masks)
+        )
+        if need_masks:
+            try:
+                if SEG_BACKEND == "mask2former":
+                    from seg_mask2former import infer_roi_masks  # type: ignore
+                else:
+                    from seg_sam2 import infer_roi_masks  # type: ignore
+                masks, _, _ = infer_roi_masks(frame, boxes)
+            except Exception:
+                pass
     # Pluggable fast path
     if (not force_builtin) and ('_REID_PLUG' in globals()) and (globals().get('_REID_PLUG', None) is not None):
         plug = globals().get('_REID_PLUG')
