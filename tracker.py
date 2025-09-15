@@ -31,6 +31,11 @@ except Exception:
     CropSR = None  # type: ignore
 
 try:
+    from global_reid_bank import GlobalReIDBank  # type: ignore
+except Exception:
+    GlobalReIDBank = None  # type: ignore
+
+try:
     from reid_backbones import ReIDExtractor as _PluggableReID
 except Exception:
     _PluggableReID = None  # type: ignore
@@ -502,6 +507,30 @@ ARCHIVE_MAX = int(os.getenv("ARCHIVE_MAX", "100"))
 ARCHIVE_SIM_THR = float(os.getenv("ARCHIVE_SIM_THR", "0.80"))
 ARCHIVE_TTL = int(os.getenv("ARCHIVE_TTL", "600"))  # frames
 TRACK_ARCHIVE: list = []
+
+# Global appearance bank (long-gap ReID)
+GLOBAL_REID_BANK_ENABLE = int(os.getenv("GLOBAL_REID_BANK_ENABLE", "1")) == 1
+GLOBAL_REID_BANK_MAX = int(os.getenv("GLOBAL_REID_BANK_MAX", "2048"))
+GLOBAL_REID_BANK_TTL = int(os.getenv("GLOBAL_REID_BANK_TTL", "900"))
+GLOBAL_REID_BANK_PER_TRACK = int(os.getenv("GLOBAL_REID_BANK_PER_TRACK", "5"))
+GLOBAL_REID_BANK_TOPK = int(os.getenv("GLOBAL_REID_BANK_TOPK", "5"))
+GLOBAL_REID_BANK_SIM_THR = float(os.getenv("GLOBAL_REID_BANK_SIM_THR", "0.78"))
+GLOBAL_REID_BANK_HIST_THR = float(os.getenv("GLOBAL_REID_BANK_HIST_THR", "0.55"))
+GLOBAL_REID_BANK_BACKEND = os.getenv("GLOBAL_REID_BANK_BACKEND", "auto").strip()
+
+if GLOBAL_REID_BANK_ENABLE and APPEAR_EMB_ENABLE and GlobalReIDBank is not None:
+    try:
+        GLOBAL_REID_BANK = GlobalReIDBank(
+            dim=None,
+            max_records=GLOBAL_REID_BANK_MAX,
+            ttl_frames=GLOBAL_REID_BANK_TTL,
+            per_track_max=max(1, GLOBAL_REID_BANK_PER_TRACK),
+            backend=GLOBAL_REID_BANK_BACKEND,
+        )
+    except Exception:
+        GLOBAL_REID_BANK = None
+else:
+    GLOBAL_REID_BANK = None
 
 # --- Auto-Flex thresholds ---
 FLEX_ENABLE = int(os.getenv("FLEX_ENABLE", "0")) == 0
@@ -1130,6 +1159,11 @@ def appearance_associate(
     Drop policy: tracks removed if time_since_update > BT_BUFFER.
     """
     num_dets = len(boxes)
+    if GLOBAL_REID_BANK is not None:
+        try:
+            GLOBAL_REID_BANK.prune(frame_idx)
+        except Exception:
+            pass
     if num_dets == 0:
         # Increment time_since_update and drop expired
         dropped = []
@@ -1724,6 +1758,22 @@ def appearance_associate(
             "hist_bank": hist_bank,
 
         }
+        if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE:
+            try:
+                meta_bank = {
+                    "hist": new_state[tid].get("hist"),
+                    "age": new_state[tid].get("age"),
+                    "hits": new_state[tid].get("hits"),
+                    "last_bbox": new_state[tid].get("last_bbox"),
+                    "last_frame": frame_idx,
+                }
+                vec_bank = det_embs[c] if c < len(det_embs) else None
+                if vec_bank is None:
+                    vec_bank = new_state[tid].get("emb")
+                if vec_bank is not None:
+                    GLOBAL_REID_BANK.add(int(tid), vec_bank, frame_idx, meta=meta_bank)
+            except Exception:
+                pass
         assigned_ids[c] = int(tid)
         used_d.add(c);
         used_t.add(r)
@@ -1765,6 +1815,26 @@ def appearance_associate(
                         TRACK_ARCHIVE.pop(0)
             except Exception:
                 pass
+            if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE:
+                try:
+                    emb_bank = s.get("emb_bank", [])
+                    if isinstance(emb_bank, list) and len(emb_bank) > 0:
+                        vecs = emb_bank[-min(len(emb_bank), max(1, GLOBAL_REID_BANK_PER_TRACK)) :]
+                    else:
+                        vec_single = s.get("emb")
+                        vecs = [vec_single] if isinstance(vec_single, np.ndarray) else []
+                    meta_bank = {
+                        "hist": s.get("hist"),
+                        "age": s.get("age"),
+                        "hits": s.get("hits"),
+                        "last_bbox": s.get("last_bbox"),
+                        "last_frame": int(s.get("last_frame", frame_idx)),
+                    }
+                    for vb in vecs:
+                        if isinstance(vb, np.ndarray):
+                            GLOBAL_REID_BANK.add(int(tid), vb, frame_idx, meta=meta_bank)
+                except Exception:
+                    pass
             dropped_pairs.append((int(tid), int(s.get("age", 0))))
             continue
         # keep in state as missing
@@ -1847,6 +1917,81 @@ def appearance_associate(
         if reclaimed:
             continue
 
+        bank_reused = False
+        if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE:
+            det_emb = det_embs[di] if di < len(det_embs) else None
+            if det_emb is not None:
+                det_hist = det_hists[di] if di < len(det_hists) else None
+                try:
+                    exclude_ids = set(new_state.keys())
+                    candidates = GLOBAL_REID_BANK.query(
+                        det_emb,
+                        frame_idx,
+                        top_k=max(1, GLOBAL_REID_BANK_TOPK),
+                        sim_threshold=GLOBAL_REID_BANK_SIM_THR,
+                        exclude_ids=exclude_ids,
+                    )
+                    for cand_tid, sim_bank, meta in candidates:
+                        if cand_tid in used_reclaims:
+                            continue
+                        if cand_tid in new_state:
+                            continue
+                        bank_hist = None
+                        hist_ok = True
+                        if meta:
+                            bank_hist = meta.get("hist")
+                        hist_score = None
+                        if det_hist is not None and bank_hist is not None:
+                            hist_score = _hist_similarity(det_hist, bank_hist)
+                            if hist_score is not None:
+                                hist_ok = hist_score >= GLOBAL_REID_BANK_HIST_THR
+                        if not hist_ok:
+                            continue
+                        cand_state = {
+                            "last_bbox": db,
+                            "last_center": _bbox_center(db),
+                            "prev_vel": (0.0, 0.0),
+                            "last_vel": (0.0, 0.0),
+                            "last_frame": frame_idx,
+                            "age": int((meta or {}).get("age", 0)) + 1,
+                            "hits": int((meta or {}).get("hits", 0)) + 1,
+                            "time_since_update": 0,
+                            "emb": det_emb,
+                            "emb_init": det_emb,
+                            "emb_bank": [det_emb] if isinstance(det_emb, np.ndarray) else [],
+                            "hist": det_hist if det_hist is not None else bank_hist,
+                            "emb_sim_recover": float(sim_bank),
+                        }
+                        hist_for_bank = cand_state.get("hist")
+                        if hist_for_bank is not None:
+                            cand_state["hist_bank"] = [hist_for_bank]
+                        new_state[int(cand_tid)] = cand_state
+                        assigned_ids[di] = int(cand_tid)
+                        used_reclaims.add(int(cand_tid))
+                        recovered_ids += 1
+                        bank_reused = True
+                        try:
+                            meta_update = {
+                                "hist": hist_for_bank,
+                                "age": cand_state.get("age"),
+                                "hits": cand_state.get("hits"),
+                                "last_bbox": db,
+                                "last_frame": frame_idx,
+                            }
+                            GLOBAL_REID_BANK.add(int(cand_tid), det_emb, frame_idx, meta=meta_update)
+                            # Remove from archive if present to avoid duplicate revival
+                            if ARCHIVE_ENABLE and len(TRACK_ARCHIVE) > 0:
+                                TRACK_ARCHIVE[:] = [
+                                    r for r in TRACK_ARCHIVE if int(r.get("tid", -1)) != int(cand_tid)
+                                ]
+                        except Exception:
+                            pass
+                        break
+                except Exception:
+                    bank_reused = False
+        if bank_reused:
+            continue
+
         # Try long-gap ID reuse from archive before spawning new
         reused = False
         if ARCHIVE_ENABLE and di < len(det_embs) and det_embs[di] is not None and len(TRACK_ARCHIVE) > 0:
@@ -1914,7 +2059,8 @@ def appearance_associate(
         dcx, dcy = _bbox_center(db)
         emb_spawn = det_embs[di] if di < len(det_embs) else None
         hist_spawn = det_hists[di] if di < len(det_hists) else None
-        new_state[next_tid] = {
+        spawn_tid = int(next_tid)
+        new_state[spawn_tid] = {
             "last_bbox": db,
             "last_center": (dcx, dcy),
             "last_vel": (0.0, 0.0),
@@ -1927,7 +2073,20 @@ def appearance_associate(
             "emb_bank": ([emb_spawn] if isinstance(emb_spawn, np.ndarray) else []),
             "hist": hist_spawn,
         }
-        assigned_ids[di] = int(next_tid)
+        if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE:
+            try:
+                meta_bank = {
+                    "hist": hist_spawn,
+                    "age": 1,
+                    "hits": 1,
+                    "last_bbox": db,
+                    "last_frame": frame_idx,
+                }
+                if emb_spawn is not None:
+                    GLOBAL_REID_BANK.add(spawn_tid, emb_spawn, frame_idx, meta=meta_bank)
+            except Exception:
+                pass
+        assigned_ids[di] = int(spawn_tid)
         next_tid += 1
 
     return assigned_ids, new_state, next_tid, dropped_pairs, recovered_ids, id_switch_est
