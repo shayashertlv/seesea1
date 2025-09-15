@@ -149,7 +149,18 @@ class ReIDExtractor:
             except Exception:
                 pass
         if not load_ok or (self.model is None and self.backend != "fusion"):
-            raise RuntimeError("Failed to initialize any ReID backbone (torchvision/timm/osnet/open_clip)")
+            raise RuntimeError(
+                "Failed to initialize any ReID backbone (torchvision/timm/osnet/open_clip)"
+            )
+
+        # Optionally load domain-specific weights from env
+        weights_path = os.getenv("REID_WEIGHTS", "")
+        if weights_path and self.model is not None and os.path.exists(weights_path):
+            try:
+                state = torch.load(weights_path, map_location=self.device)
+                self.model.load_state_dict(state, strict=False)
+            except Exception:
+                pass
 
     def _load_osnet(self):
         self.is_vit_square = False
