@@ -516,6 +516,313 @@ class ReIDExtractor:
         except Exception:
             return None
 
+    def _forward_heavy_batch(self, crops: List[Optional[np.ndarray]], batch_size: int) -> List[Optional[np.ndarray]]:
+        dev = self.device
+        bs = max(1, int(batch_size))
+        outs: List[Optional[np.ndarray]] = [None] * len(crops)
+        if self.backend in ("clip_vitl14", "clip_vith14"):
+            groups: List[Optional[tuple[int, int]]] = []
+            tens: List[torch.Tensor] = []
+            for crop in crops:
+                if crop is None:
+                    groups.append(None)
+                    continue
+                tta: List[torch.Tensor] = []
+                t = self._preprocess_clip(crop)
+                if t is not None:
+                    tta.append(t)
+                if self.tta_mode in (1, 3):
+                    t2 = self._preprocess_clip(cv2.flip(crop, 1))
+                    if t2 is not None:
+                        tta.append(t2)
+                if self.tta_mode == 3:
+                    pad = cv2.copyMakeBorders(crop, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+                    t3 = self._preprocess_clip(pad)
+                    if t3 is not None:
+                        tta.append(t3)
+                if not tta:
+                    groups.append(None)
+                    continue
+                groups.append((len(tens), len(tta)))
+                tens.extend(tta)
+            vecs = None
+            if tens:
+                with torch.no_grad():
+                    cur: List[torch.Tensor] = []
+                    vec_list: List[torch.Tensor] = []
+                    for ten in tens:
+                        cur.append(ten.unsqueeze(0))
+                        if len(cur) == bs:
+                            batch = torch.cat(cur, dim=0)
+                            if dev.type == "cuda":
+                                try:
+                                    batch = batch.pin_memory()
+                                except Exception:
+                                    pass
+                                batch = batch.to(dev, non_blocking=True)
+                            else:
+                                batch = batch.to(dev)
+                            if self.fp16 and dev.type == "cuda":
+                                batch = batch.half()
+                            if hasattr(self.model, "encode_image"):
+                                emb = self.model.encode_image(batch)
+                            else:
+                                emb = self.model(batch)
+                            emb = emb.float()
+                            vec_list.append(emb.detach().cpu())
+                            cur = []
+                    if cur:
+                        batch = torch.cat(cur, dim=0)
+                        if dev.type == "cuda":
+                            try:
+                                batch = batch.pin_memory()
+                            except Exception:
+                                pass
+                            batch = batch.to(dev, non_blocking=True)
+                        else:
+                            batch = batch.to(dev)
+                        if self.fp16 and dev.type == "cuda":
+                            batch = batch.half()
+                        if hasattr(self.model, "encode_image"):
+                            emb = self.model.encode_image(batch)
+                        else:
+                            emb = self.model(batch)
+                        emb = emb.float()
+                        vec_list.append(emb.detach().cpu())
+                if vec_list:
+                    vecs = torch.cat(vec_list, dim=0).numpy()
+            if vecs is not None:
+                for i, g in enumerate(groups):
+                    if g is None:
+                        continue
+                    s, c = g
+                    v = vecs[s:s + c].mean(axis=0)
+                    if self.pca_dim > 0:
+                        v = self._pca_reduce_cached(v, self.pca_dim)
+                    n = float(np.linalg.norm(v))
+                    if n > 1e-12:
+                        v = v / n
+                    outs[i] = v.astype(np.float32)
+        elif self.backend == "dinov2_vitl14":
+            groups = []
+            tens = []
+            for crop in crops:
+                if crop is None:
+                    groups.append(None)
+                    continue
+                tta = [self._preprocess(crop)]
+                if self.tta_mode in (1, 3):
+                    tta.append(self._preprocess(cv2.flip(crop, 1)))
+                if self.tta_mode == 3:
+                    pad = cv2.copyMakeBorders(crop, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+                    tta.append(self._preprocess(pad))
+                groups.append((len(tens), len(tta)))
+                tens.extend(tta)
+            vecs = None
+            if tens:
+                with torch.no_grad():
+                    cur = []
+                    vec_list = []
+                    for ten in tens:
+                        cur.append(ten.unsqueeze(0))
+                        if len(cur) == bs:
+                            batch = torch.cat(cur, dim=0)
+                            if dev.type == "cuda":
+                                try:
+                                    batch = batch.pin_memory()
+                                except Exception:
+                                    pass
+                                batch = batch.to(dev, non_blocking=True)
+                            else:
+                                batch = batch.to(dev)
+                            if self.fp16 and dev.type == "cuda":
+                                batch = batch.half()
+                            emb = self.model(batch)  # type: ignore[operator]
+                            if isinstance(emb, (list, tuple)):
+                                emb = emb[0]
+                            emb = emb.float()
+                            vec_list.append(emb.detach().cpu())
+                            cur = []
+                    if cur:
+                        batch = torch.cat(cur, dim=0)
+                        if dev.type == "cuda":
+                            try:
+                                batch = batch.pin_memory()
+                            except Exception:
+                                pass
+                            batch = batch.to(dev, non_blocking=True)
+                        else:
+                            batch = batch.to(dev)
+                        if self.fp16 and dev.type == "cuda":
+                            batch = batch.half()
+                        emb = self.model(batch)  # type: ignore[operator]
+                        if isinstance(emb, (list, tuple)):
+                            emb = emb[0]
+                        emb = emb.float()
+                        vec_list.append(emb.detach().cpu())
+                if vec_list:
+                    vecs = torch.cat(vec_list, dim=0).numpy()
+            if vecs is not None:
+                for i, g in enumerate(groups):
+                    if g is None:
+                        continue
+                    s, c = g
+                    v = vecs[s:s + c].mean(axis=0)
+                    if self.pca_dim > 0:
+                        v = self._pca_reduce_cached(v, self.pca_dim)
+                    n = float(np.linalg.norm(v))
+                    if n > 1e-12:
+                        v = v / n
+                    outs[i] = v.astype(np.float32)
+        else:  # fusion
+            groups_c: List[Optional[tuple[int, int]]] = []
+            tens_c: List[torch.Tensor] = []
+            groups_d: List[Optional[tuple[int, int]]] = []
+            tens_d: List[torch.Tensor] = []
+            for crop in crops:
+                if crop is None:
+                    groups_c.append(None)
+                    groups_d.append(None)
+                    continue
+                tta_c: List[torch.Tensor] = []
+                t = self._preprocess_clip(crop)
+                if t is not None:
+                    tta_c.append(t)
+                if self.tta_mode in (1, 3):
+                    t2 = self._preprocess_clip(cv2.flip(crop, 1))
+                    if t2 is not None:
+                        tta_c.append(t2)
+                if self.tta_mode == 3:
+                    pad = cv2.copyMakeBorders(crop, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+                    t3 = self._preprocess_clip(pad)
+                    if t3 is not None:
+                        tta_c.append(t3)
+                if tta_c:
+                    groups_c.append((len(tens_c), len(tta_c)))
+                    tens_c.extend(tta_c)
+                else:
+                    groups_c.append(None)
+                tta_d = [self._preprocess(crop)]
+                if self.tta_mode in (1, 3):
+                    tta_d.append(self._preprocess(cv2.flip(crop, 1)))
+                if self.tta_mode == 3:
+                    pad = cv2.copyMakeBorders(crop, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+                    tta_d.append(self._preprocess(pad))
+                groups_d.append((len(tens_d), len(tta_d)))
+                tens_d.extend(tta_d)
+            vecs_c = None
+            if tens_c:
+                with torch.no_grad():
+                    cur = []
+                    vec_list = []
+                    for ten in tens_c:
+                        cur.append(ten.unsqueeze(0))
+                        if len(cur) == bs:
+                            batch = torch.cat(cur, dim=0)
+                            if dev.type == "cuda":
+                                try:
+                                    batch = batch.pin_memory()
+                                except Exception:
+                                    pass
+                                batch = batch.to(dev, non_blocking=True)
+                            else:
+                                batch = batch.to(dev)
+                            if self.fp16 and dev.type == "cuda":
+                                batch = batch.half()
+                            mc = self.model_clip
+                            if hasattr(mc, "encode_image"):
+                                emb = mc.encode_image(batch)
+                            else:
+                                emb = mc(batch)
+                            emb = emb.float()
+                            vec_list.append(emb.detach().cpu())
+                            cur = []
+                    if cur:
+                        batch = torch.cat(cur, dim=0)
+                        if dev.type == "cuda":
+                            try:
+                                batch = batch.pin_memory()
+                            except Exception:
+                                pass
+                            batch = batch.to(dev, non_blocking=True)
+                        else:
+                            batch = batch.to(dev)
+                        if self.fp16 and dev.type == "cuda":
+                            batch = batch.half()
+                        mc = self.model_clip
+                        if hasattr(mc, "encode_image"):
+                            emb = mc.encode_image(batch)
+                        else:
+                            emb = mc(batch)
+                        emb = emb.float()
+                        vec_list.append(emb.detach().cpu())
+                if vec_list:
+                    vecs_c = torch.cat(vec_list, dim=0).numpy()
+            vecs_d = None
+            if tens_d:
+                with torch.no_grad():
+                    cur = []
+                    vec_list = []
+                    for ten in tens_d:
+                        cur.append(ten.unsqueeze(0))
+                        if len(cur) == bs:
+                            batch = torch.cat(cur, dim=0)
+                            if dev.type == "cuda":
+                                try:
+                                    batch = batch.pin_memory()
+                                except Exception:
+                                    pass
+                                batch = batch.to(dev, non_blocking=True)
+                            else:
+                                batch = batch.to(dev)
+                            if self.fp16 and dev.type == "cuda":
+                                batch = batch.half()
+                            md = self.model_dino
+                            emb = md(batch)
+                            if isinstance(emb, (list, tuple)):
+                                emb = emb[0]
+                            emb = emb.float()
+                            vec_list.append(emb.detach().cpu())
+                            cur = []
+                    if cur:
+                        batch = torch.cat(cur, dim=0)
+                        if dev.type == "cuda":
+                            try:
+                                batch = batch.pin_memory()
+                            except Exception:
+                                pass
+                            batch = batch.to(dev, non_blocking=True)
+                        else:
+                            batch = batch.to(dev)
+                        if self.fp16 and dev.type == "cuda":
+                            batch = batch.half()
+                        md = self.model_dino
+                        emb = md(batch)
+                        if isinstance(emb, (list, tuple)):
+                            emb = emb[0]
+                        emb = emb.float()
+                        vec_list.append(emb.detach().cpu())
+                if vec_list:
+                    vecs_d = torch.cat(vec_list, dim=0).numpy()
+            if vecs_c is not None and vecs_d is not None:
+                for i in range(len(crops)):
+                    g_c = groups_c[i]
+                    g_d = groups_d[i]
+                    if g_c is None or g_d is None:
+                        continue
+                    s_c, c_c = g_c
+                    s_d, c_d = g_d
+                    vclip = vecs_c[s_c:s_c + c_c].mean(axis=0)
+                    vdino = vecs_d[s_d:s_d + c_d].mean(axis=0)
+                    v = np.concatenate([vclip, vdino], axis=0).astype(np.float32)
+                    if self.pca_dim > 0:
+                        v = self._pca_reduce_cached(v, self.pca_dim)
+                    n = float(np.linalg.norm(v))
+                    if n > 1e-12:
+                        v = v / n
+                    outs[i] = v.astype(np.float32)
+        return outs
+
     def forward(self, list_of_crops_bgr: List[Optional[np.ndarray]], batch_size: int = 32) -> np.ndarray:
         # For heavy backends, run per-crop with TTA and PCA. Keep batching for legacy paths.
         if self.model is None and self.backend != "fusion" and self.model_clip is None:
@@ -523,14 +830,11 @@ class ReIDExtractor:
         if len(list_of_crops_bgr) == 0:
             return np.zeros((0, 0), dtype=np.float32)
         heavy = self.backend in ("clip_vitl14","clip_vith14","fusion","dinov2_vitl14")
-        outs: List[Optional[np.ndarray]] = [None] * len(list_of_crops_bgr)
+        outs: List[Optional[np.ndarray]]
         if heavy:
-            for i, crop in enumerate(list_of_crops_bgr):
-                if crop is None:
-                    continue
-                v = self._embed_one(crop)
-                outs[i] = v if (isinstance(v, np.ndarray) and v.size>0) else None
+            outs = self._forward_heavy_batch(list_of_crops_bgr, batch_size)
         else:
+            outs = [None] * len(list_of_crops_bgr)
             # Collect tensors
             tens = []
             idxs = []
