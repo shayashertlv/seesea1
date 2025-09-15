@@ -13,6 +13,7 @@ except Exception:
     HAS_TORCH = False
 
 LSTM_APPEAR_HIDDEN = int(os.getenv("LSTM_APPEAR_HIDDEN", "128"))
+LSTM_APPEAR_ENABLE = int(os.getenv("LSTM_APPEAR_ENABLE", "1")) == 1
 
 if HAS_TORCH:
     class SeqTrackLSTM(nn.Module):
@@ -29,7 +30,8 @@ if HAS_TORCH:
                      num_layers: int = 2,
                      variant: str = 'A',
                      device: str = 'cuda',
-                     fp16: bool = True):
+                     fp16: bool = True,
+                     appear_enable: bool = LSTM_APPEAR_ENABLE):
             super().__init__()
             self.hidden_size = int(hidden_size)
             self.num_layers = int(num_layers)
@@ -38,6 +40,7 @@ if HAS_TORCH:
             self.device = torch.device(
                 device if device in ('cpu', 'cuda') else ('cuda' if torch.cuda.is_available() else 'cpu'))
             self.fp16 = bool(fp16) and (self.device.type == 'cuda')
+            self.appear_enable = bool(appear_enable)
             # Core BiLSTM backbone
             self.lstm = nn.LSTM(self.input_size, self.hidden_size, self.num_layers,
                                 batch_first=True, bidirectional=True, dropout=0.1)
@@ -123,7 +126,7 @@ if HAS_TORCH:
             Lazy-creates a 1-layer GRU and a linear projection to keep footprint tiny.
             Returns a torch.Tensor of shape (1, H) on self.device, or None if not available.
             """
-            if not LSTM_APPEAR_ENABLE:
+            if not getattr(self, "appear_enable", True):
                 return None
             try:
                 T = max(len(reid_seq or []), len(hist_seq or []))
