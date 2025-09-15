@@ -6,6 +6,8 @@ import cv2
 import numpy as np
 import json
 from collections import deque
+import logging
+import argparse
 
 # GMC & ReID pluggable backbones
 try:
@@ -38,6 +40,19 @@ _REID_PLUG = None  # pluggable ReID instance if available
 
 # Notebook inline display (graceful if not in Jupyter)
 IN_NOTEBOOK = False
+
+
+def configure_logging(level: Optional[str] = None) -> None:
+    level_name = (level or os.getenv("LOG_LEVEL", "INFO")).upper()
+    logging.basicConfig(
+        level=getattr(logging, level_name, logging.INFO),
+        format="%(levelname)s:%(name)s:%(message)s",
+        force=True,
+    )
+
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 # ================================================================
 # Surfers tracker: YOLO + Supervision(ByteTrack) with appearance-aware association
@@ -74,7 +89,7 @@ try:
                     if callable(_ORIG_FUSE):
                         return _ORIG_FUSE(self, verbose=verbose)
                 except Exception as e:  # pragma: no cover - runtime safety
-                    print(f"[sv-pipeline] Warning: skipping model fusion due to: {e}")
+                    logger.warning("[sv-pipeline] Warning: skipping model fusion due to: %s", e)
                 return self
 
 
@@ -107,7 +122,7 @@ CAPTURES_DIR = os.getenv("CAPTURES_FOLDER", "/workspace/seesea/captures")
 _default_weights_win = r"C:\Users\Shay\PycharmProjects\seesea\weights\surf_polish640_best.pt"
 if os.name == "nt" and "YOLO_WEIGHTS_PATH" not in os.environ and os.path.exists(_default_weights_win):
     WEIGHTS_PATH = _default_weights_win
-print(f"[weights] using: {os.path.abspath(WEIGHTS_PATH)}")
+logger.info("[weights] using: %s", os.path.abspath(WEIGHTS_PATH))
 
 # On Windows, prefer explicit absolute default if not overridden
 if os.name == "nt" and os.getenv("CAPTURES_FOLDER", "").strip() == "":
@@ -465,7 +480,7 @@ def _diag_emit(event: str, **kv):
         if not DIAG:
             return
         rec = {"evt": event, **kv}
-        print(f"[sv][diag] {json.dumps(rec)}", flush=True)
+        logger.debug("[sv][diag] %s", json.dumps(rec))
         if DIAG_JSON:
             global _diag_fp
             if _diag_fp is None:
@@ -2269,7 +2284,7 @@ def _init_reid():
                 _REID_PLUG = _PluggableReID(backend=REID_BACKBONE, device=REID_DEVICE, fp16=REID_FP16)
                 return True
             except Exception as e:
-                print("[sv-pipeline] warning: ReID backend failed to load, falling back to OSNet")
+                logger.warning("[sv-pipeline] warning: ReID backend failed to load, falling back to OSNet")
     except Exception:
         pass
     try:
@@ -2476,7 +2491,7 @@ def _extract_yolo_seg_masks(res: Any, frame_bgr: np.ndarray, det_xyxy: List[Tupl
                                 pass
                         if (k > 0) and (os.getenv("DEBUG", "0") == "1" or os.getenv("DIAG", "1") == "1"):
                             try:
-                                print(f"[sv] YOLO-SEG masks: {k}/{n}")
+                                logger.debug("[sv] YOLO-SEG masks: %s/%s", k, n)
                             except Exception:
                                 pass
                         return det_masks, det_mask_boxes, det_vis
@@ -2500,7 +2515,7 @@ def _extract_yolo_seg_masks(res: Any, frame_bgr: np.ndarray, det_xyxy: List[Tupl
                         masks_h, boxes_h, vis_h = None, None, None
                 if masks_h is not None and boxes_h is not None and vis_h is not None:
                     if not _extract_yolo_seg_masks._heavy_log:  # type: ignore[attr-defined]
-                        print(f"[seg] heavy backend active: {SEG_BACKEND}")
+                        logger.info("[seg] heavy backend active: %s", SEG_BACKEND)
                         _extract_yolo_seg_masks._heavy_log = True  # type: ignore[attr-defined]
                     return masks_h, boxes_h, vis_h
         except Exception:
@@ -2810,7 +2825,7 @@ def _compute_embeddings_for_dets(frame: np.ndarray,
         pass
     if PROFILE_EMB:
         import time as _t
-        print(f"[emb] frame batch {len(boxes)} -> took {(_t.time() - t0):.3f}s")
+        logger.debug("[emb] frame batch %s -> took %.3fs", len(boxes), (_t.time() - t0))
     return outs
 
 
@@ -2914,7 +2929,7 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
         raise FileNotFoundError(f"Video not found: {VIDEO_PATH}")
 
     if DIAG:
-        print(
+        logger.debug(
             "[sv] cfg | "
             f"ASSOC_APPEAR_ENABLE={int(ASSOC_APPEAR_ENABLE)} "
             f"APPEAR_EMB_ENABLE={int(APPEAR_EMB_ENABLE)} "
@@ -2923,7 +2938,6 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
             f"BT_MATCH={BT_MATCH_THRESH} BT_HIGH={BT_TRACK_THRESH} BT_BUFFER={BT_BUFFER} "
             f"SMOOTH_BOXES={int(SMOOTH_BOXES)} SLICER_ENABLE={int(SLICER_ENABLE)} "
             f"ROI_ENFORCE={int(ROI_ENFORCE)} TRACK_CONF={TRACK_CONF} TRACK_IOU={TRACK_IOU}",
-            flush=True
         )
     ensure_dir(CAPTURES_DIR)
     model = YOLO(WEIGHTS_PATH)
@@ -3135,11 +3149,11 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                     if status == 'timeout':
                         slicer_timeouts += 1
                         if DEBUG or DRAW_DEBUG:
-                            print(f"[sv-pipeline] slicer timeout on frame {frame_idx} (#{slicer_fail_count})")
+                            logger.warning("[sv-pipeline] slicer timeout on frame %s (#%s)", frame_idx, slicer_fail_count)
                     else:
                         slicer_errors += 1
                         if DEBUG or DRAW_DEBUG:
-                            print(f"[sv-pipeline] slicer error on frame {frame_idx} (#{slicer_fail_count})")
+                            logger.warning("[sv-pipeline] slicer error on frame %s (#%s)", frame_idx, slicer_fail_count)
                     # Fallback to direct YOLO inference for this frame (with optional TTA/ensemble)
                     if DET_ENSEMBLE or DET_TTA:
                         detections = _infer_ensemble(
@@ -3178,8 +3192,12 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                     if slicer_fail_count >= SLICER_TIMEOUT_DISABLE_AFTER:
                         slicer = None
                         if not slicer_disabled_logged:
-                            print(
-                                f"[sv-pipeline] disabling slicer after {slicer_fail_count} failures (timeouts={slicer_timeouts}, errors={slicer_errors})")
+                            logger.warning(
+                                "[sv-pipeline] disabling slicer after %s failures (timeouts=%s, errors=%s)",
+                                slicer_fail_count,
+                                slicer_timeouts,
+                                slicer_errors,
+                            )
                             slicer_disabled_logged = True
             else:
                 # Normal path (no slicer): run ensemble/TTA if enabled, else single-model
@@ -3218,7 +3236,7 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                         last_mask_boxes = None
                         last_mask_vis = None
         except KeyboardInterrupt:
-            print("[sv-pipeline] KeyboardInterrupt: stopping processing loop")
+            logger.info("[sv-pipeline] KeyboardInterrupt: stopping processing loop")
             break
 
         # Optional class filter BEFORE tracking to reduce noise
@@ -3306,7 +3324,7 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                 }
 
                 if FLEX_LOG and (frame_idx % 60 == 0):
-                    print(json.dumps({
+                    logger.info(json.dumps({
                         "frame": int(frame_idx),
                         "conf_thr": round(conf_thr, 3),
                         "assoc_min_iou": round(assoc_min_iou_cur, 3),
@@ -3889,7 +3907,7 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
             writer.write(frame)
         # Periodic compact logging
         if LOG_EVERY > 0 and ((frame_idx + 1) % LOG_EVERY == 0):
-            print(
+            logger.info(
                 f"[track] frame={frame_idx + 1} active={len(state)} created={created_total} dropped={dropped_total} recovered={recovered_total} est_id_switches={id_switch_est_total}")
 
     # Cleanup
@@ -3983,7 +4001,7 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
             _diag_fp = None
     except Exception:
         pass
-    print(
+    logger.info(
         f"[done] frames={metrics['frames']} created={metrics['tracks_created']} dropped={metrics['tracks_dropped']} avg_len={metrics['avg_track_length']} recovered={metrics['recovered_ids']} est_id_switches={metrics['est_id_switches']} mode={mode} video={video_str} mot={mot_str}")
     return metrics
 
@@ -3992,7 +4010,7 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
 # Main (notebook)
 # -----------------------------
 def run_pipeline_notebook():
-    print(
+    logger.info(
         f"[✓] YOLO + Supervision ByteTrack (conf={TRACK_CONF}, iou={TRACK_IOU}, slicer={'on' if SLICER_ENABLE else 'off'})")
     os.makedirs(CAPTURES_DIR, exist_ok=True)
     data = run_tracking_with_supervision()
@@ -4000,4 +4018,12 @@ def run_pipeline_notebook():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--log-level",
+        default=os.getenv("LOG_LEVEL", "INFO"),
+        help="Logging level (e.g. DEBUG, INFO, WARNING)",
+    )
+    args = parser.parse_args()
+    configure_logging(args.log_level)
     run_pipeline_notebook()
