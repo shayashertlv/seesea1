@@ -1,8 +1,12 @@
 from typing import List, Optional
 import os
+from collections import deque
+import threading
 
 import numpy as np
 import cv2
+
+PCA_BUF_MAX = 5000
 
 # Optional dependencies
 try:
@@ -49,6 +53,10 @@ class ReIDExtractor:
     - dinov2_vitl14: via timm ViT large patch14 DINOv2.
     - clip_vitl14 / clip_vith14: via open_clip pretrained="openai".
     - fusion: concat of CLIP-L/14 and DINOv2-L/14 (then optional PCA).
+
+    The optional PCA cache is shared across instances and guarded by a
+    threading lock so that this extractor can be called from multiple
+    threads concurrently.
     """
     def __init__(self, backend: str = "osnet", device: str = "auto", fp16: bool = False):
         self.backend = (backend or "osnet").lower()
@@ -73,7 +81,8 @@ class ReIDExtractor:
             ReIDExtractor._pca_ready = False  # type: ignore[attr-defined]
             ReIDExtractor._pca_mean = None    # type: ignore[attr-defined]
             ReIDExtractor._pca_comp = None    # type: ignore[attr-defined]
-            ReIDExtractor._pca_buf = []       # type: ignore[attr-defined]
+            ReIDExtractor._pca_buf = deque(maxlen=PCA_BUF_MAX)  # type: ignore[attr-defined]
+            ReIDExtractor._pca_lock = threading.Lock()  # type: ignore[attr-defined]
         if not HAS_TORCH:
             raise RuntimeError("PyTorch not available for ReIDExtractor")
         # Device selection
@@ -339,17 +348,12 @@ class ReIDExtractor:
             V = vecs
             if V.ndim == 1:
                 V = V[None, :]
-            if not getattr(ReIDExtractor, "_pca_ready", False):
-                buf = getattr(ReIDExtractor, "_pca_buf", [])
-                # reservoir limit ~5000
-                max_buf = 5000
+            with ReIDExtractor._pca_lock:
+                buf = ReIDExtractor._pca_buf
                 for i in range(min(V.shape[0], 64)):
                     buf.append(V[i].astype(np.float32))
-                if len(buf) > max_buf:
-                    buf = buf[-max_buf:]
-                ReIDExtractor._pca_buf = buf  # type: ignore[attr-defined]
-                # Fit when enough samples
-                if len(buf) >= max(256, out_dim + 8):
+                if (not ReIDExtractor._pca_ready and
+                        len(buf) >= max(256, out_dim + 8)):
                     X = np.stack(buf, axis=0).astype(np.float32)
                     mu = X.mean(axis=0, keepdims=True)
                     Xc = X - mu
@@ -363,18 +367,17 @@ class ReIDExtractor:
                         eigvals, eigvecs = np.linalg.eigh(C)
                         order = np.argsort(eigvals)[::-1][:out_dim]
                         comp = eigvecs[:, order]
-                    ReIDExtractor._pca_mean = mu.astype(np.float32)  # type: ignore[attr-defined]
-                    ReIDExtractor._pca_comp = comp.astype(np.float32)  # type: ignore[attr-defined]
-                    ReIDExtractor._pca_ready = True  # type: ignore[attr-defined]
-            # Transform using cached params if available
-            if getattr(ReIDExtractor, "_pca_ready", False):
-                mu = getattr(ReIDExtractor, "_pca_mean", None)
-                comp = getattr(ReIDExtractor, "_pca_comp", None)
-                if mu is not None and comp is not None:
-                    X = V.astype(np.float32)
-                    Xc = X - mu
-                    Y = Xc @ comp  # (N,out_dim)
-                    return Y if vecs.ndim > 1 else Y[0]
+                    ReIDExtractor._pca_mean = mu.astype(np.float32)
+                    ReIDExtractor._pca_comp = comp.astype(np.float32)
+                    ReIDExtractor._pca_ready = True
+                ready = ReIDExtractor._pca_ready
+                mu = ReIDExtractor._pca_mean if ready else None
+                comp = ReIDExtractor._pca_comp if ready else None
+            if ready and mu is not None and comp is not None:
+                X = V.astype(np.float32)
+                Xc = X - mu
+                Y = Xc @ comp  # (N,out_dim)
+                return Y if vecs.ndim > 1 else Y[0]
             return vecs
         except Exception:
             return vecs

@@ -16,3 +16,10 @@ pipeline.
 ```bash
 python -m cli --log-level DEBUG
 ```
+
+## Thread Safety
+
+`ReIDExtractor` maintains a shared PCA cache that is protected by a
+threading lock. It is safe to call `forward` or other embedding helpers
+from multiple threads within the same process. The cache uses a bounded
+buffer to avoid unbounded memory growth.
