@@ -1152,6 +1152,7 @@ def appearance_associate(
         det_vis: Optional[List[float]] = None,
         assoc_gates: Optional[Dict[str, float]] = None,
         assoc_weights: Optional[Dict[str, float]] = None,
+        det_emb_quality: Optional[List[Dict[str, float]]] = None,
 ) -> Tuple[List[int], Dict[int, Dict[str, Any]], int, List[int], int, int]:
     """
     Returns (assigned_ids, new_state, new_next_tid, dropped_pairs, recovered_ids, id_switch_est)
@@ -1389,11 +1390,13 @@ def appearance_associate(
             t_hist_surfer = s.get("hist_surfer", t_hist)
             det_emb_surfer = det_embs[di] if di < len(det_embs) else None
             det_hist_surfer = det_hists[di] if di < len(det_hists) else None
+            quality = det_emb_quality[di] if (det_emb_quality is not None and di < len(det_emb_quality)) else None
+            quality_ok, quality_weight = _quality_gate(quality)
 
             # Feature-bank aware embedding similarity: max cosine over recent embeddings
             emb_sim = None
             if APPEAR_EMB_ENABLE:
-                det_vec = det_emb_surfer
+                det_vec = det_emb_surfer if quality_ok else None
                 if det_vec is not None:
                     bank = s.get("emb_bank", None)
                     if isinstance(bank, list) and len(bank) > 0:
@@ -1405,6 +1408,8 @@ def appearance_associate(
                         emb_sim = best_cs if best_cs >= -0.5 else None
                     else:
                         emb_sim = _cosine_sim(t_emb_surfer, det_vec)
+                if emb_sim is not None and quality_weight < 1.0:
+                    emb_sim *= quality_weight
             hist_sim = _hist_similarity(t_hist_surfer, det_hist_surfer) if APPEAR_ENABLE else None
             # Placeholder for future weighted part similarity:
             # emb_sim_board = _cosine_sim(s.get("emb_board"), det_embs_board[di])
@@ -1665,6 +1670,17 @@ def appearance_associate(
         vis_ok = True
         if SEG_ENABLE and (t_vis is not None):
             vis_ok = (t_vis >= VIS_MIN_FOR_UPDATE)
+        quality_info = None
+        if det_emb_quality is not None and 0 <= c < len(det_emb_quality):
+            quality_info = dict(det_emb_quality[c])
+        if quality_info is not None:
+            quality_info["conf"] = float(conf_here)
+        det_emb_cur = det_embs[c] if c < len(det_embs) else None
+        if det_emb_cur is None:
+            quality_ok, quality_weight = True, 1.0
+        else:
+            quality_ok, quality_weight = _quality_gate(quality_info)
+        can_update_emb = can_update_appear and quality_ok
         # EMA updates for appearance with gating
         hist = s.get("hist")
         if APPEAR_ENABLE and can_update_appear and vis_ok:
@@ -1695,15 +1711,16 @@ def appearance_associate(
         emb = s.get("emb")
         emb_bank = list(s.get("emb_bank", [])) if isinstance(s.get("emb_bank", []), list) else []
         emb_init = s.get("emb_init", None)
-        if APPEAR_EMB_ENABLE and can_update_appear and vis_ok:
-            e_now = det_embs[c]
+        if APPEAR_EMB_ENABLE and can_update_emb and vis_ok:
+            e_now = det_emb_cur
             if e_now is not None:
                 # initialize emb_init once
                 if emb_init is None:
                     emb_init = e_now
                 # only update EMA if shapes agree
                 if emb is not None and isinstance(emb, np.ndarray) and emb.shape == e_now.shape:
-                    alpha_e = APPEAR_EMB_ALPHA * (0.5 if slow_ema else 1.0)
+                    alpha_e = APPEAR_EMB_ALPHA * (0.5 if slow_ema else 1.0) * quality_weight
+                    alpha_e = float(np.clip(alpha_e, 0.0, 1.0))
                     emb = (1.0 - alpha_e) * emb + alpha_e * e_now
                     n = np.linalg.norm(emb)
                     if n > 1e-12:
@@ -1758,7 +1775,7 @@ def appearance_associate(
             "hist_bank": hist_bank,
 
         }
-        if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE:
+        if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE and quality_ok:
             try:
                 meta_bank = {
                     "hist": new_state[tid].get("hist"),
@@ -1767,7 +1784,7 @@ def appearance_associate(
                     "last_bbox": new_state[tid].get("last_bbox"),
                     "last_frame": frame_idx,
                 }
-                vec_bank = det_embs[c] if c < len(det_embs) else None
+                vec_bank = det_emb_cur
                 if vec_bank is None:
                     vec_bank = new_state[tid].get("emb")
                 if vec_bank is not None:
@@ -1850,6 +1867,17 @@ def appearance_associate(
         if di in used_d:
             continue
 
+        quality_info = None
+        if det_emb_quality is not None and di < len(det_emb_quality):
+            quality_info = dict(det_emb_quality[di])
+        if quality_info is not None and det_confs is not None and di < len(det_confs):
+            quality_info["conf"] = float(det_confs[di])
+        det_emb_cur = det_embs[di] if di < len(det_embs) else None
+        if det_emb_cur is None:
+            quality_ok, quality_weight = True, 1.0
+        else:
+            quality_ok, quality_weight = _quality_gate(quality_info)
+
         reclaimed = False
         if AA_STITCH_ENABLE:
             best_tid = -1
@@ -1878,7 +1906,7 @@ def appearance_associate(
 
                 ghost_emb = s.get("emb") if APPEAR_EMB_ENABLE else None
                 ghost_hist = s.get("hist") if APPEAR_ENABLE else None
-                det_emb = det_embs[di] if di < len(det_embs) else None
+                det_emb = det_emb_cur if quality_ok else None
                 det_hist = det_hists[di] if di < len(det_hists) else None
 
                 emb_sim = _cosine_sim(det_emb, ghost_emb)
@@ -1906,7 +1934,7 @@ def appearance_associate(
                     "age": int(state[best_tid].get("age", 0)) + 1,
                     "hits": int(state[best_tid].get("hits", 0)) + 1,
                     "time_since_update": 0,
-                    "emb": det_embs[di] if di < len(det_embs) else state[best_tid].get("emb"),
+                    "emb": det_emb_cur if quality_ok else state[best_tid].get("emb"),
                     "hist": det_hists[di] if di < len(det_hists) else state[best_tid].get("hist"),
                 }
                 assigned_ids[di] = best_tid
@@ -1918,8 +1946,8 @@ def appearance_associate(
             continue
 
         bank_reused = False
-        if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE:
-            det_emb = det_embs[di] if di < len(det_embs) else None
+        if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE and quality_ok:
+            det_emb = det_emb_cur
             if det_emb is not None:
                 det_hist = det_hists[di] if di < len(det_hists) else None
                 try:
@@ -1994,11 +2022,11 @@ def appearance_associate(
 
         # Try long-gap ID reuse from archive before spawning new
         reused = False
-        if ARCHIVE_ENABLE and di < len(det_embs) and det_embs[di] is not None and len(TRACK_ARCHIVE) > 0:
+        if ARCHIVE_ENABLE and quality_ok and det_emb_cur is not None and len(TRACK_ARCHIVE) > 0:
             try:
                 best_tid = -1
                 best_sim = 0.0
-                vec = det_embs[di]
+                vec = det_emb_cur
                 # prune expired
                 try:
                     if len(TRACK_ARCHIVE) > 0:
@@ -2035,9 +2063,9 @@ def appearance_associate(
                             next((r.get("age", 0) for r in TRACK_ARCHIVE if int(r.get("tid", -1)) == best_tid), 0)) + 1,
                         "hits": 1,
                         "time_since_update": 0,
-                        "emb": det_embs[di],
-                        "emb_init": det_embs[di],
-                        "emb_bank": [det_embs[di]],
+                        "emb": det_emb_cur,
+                        "emb_init": det_emb_cur,
+                        "emb_bank": [det_emb_cur] if isinstance(det_emb_cur, np.ndarray) else [],
                         "hist": det_hists[di] if di < len(det_hists) else None,
                     }
                     assigned_ids[di] = best_tid
@@ -2053,11 +2081,11 @@ def appearance_associate(
             continue
 
         # default: spawn a new ID
-        if _likely_switch(db, det_embs[di] if di < len(det_embs) else None,
+        if _likely_switch(db, det_emb_cur if quality_ok else None,
                           det_hists[di] if di < len(det_hists) else None):
             id_switch_est += 1
         dcx, dcy = _bbox_center(db)
-        emb_spawn = det_embs[di] if di < len(det_embs) else None
+        emb_spawn = det_emb_cur if quality_ok else None
         hist_spawn = det_hists[di] if di < len(det_hists) else None
         spawn_tid = int(next_tid)
         new_state[spawn_tid] = {
@@ -2073,7 +2101,7 @@ def appearance_associate(
             "emb_bank": ([emb_spawn] if isinstance(emb_spawn, np.ndarray) else []),
             "hist": hist_spawn,
         }
-        if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE:
+        if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE and quality_ok:
             try:
                 meta_bank = {
                     "hist": hist_spawn,
@@ -2577,12 +2605,70 @@ def _to_tensor_rgb(rgb: np.ndarray, size_hw: _Tuple[int, int]) -> "torch.Tensor"
     return (ten - mean) / std
 
 
+def _default_quality() -> Dict[str, float]:
+    return {"blur": 1e6, "vis": 0.0, "min_side": 0.0}
+
+
+def _mask_visibility(mask: Optional[np.ndarray]) -> float:
+    if mask is None:
+        return 1.0
+    try:
+        m = np.asarray(mask)
+        if m.size == 0:
+            return 0.0
+        return float(np.mean(m > 0))
+    except Exception:
+        return 0.0
+
+
+def _estimate_blur_metric(crop: Optional[np.ndarray]) -> float:
+    if crop is None:
+        return 1e6
+    try:
+        if crop.ndim == 3 and crop.shape[2] >= 1:
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = np.asarray(crop).astype(np.uint8)
+        lap = cv2.Laplacian(gray, cv2.CV_32F)
+        var = float(lap.var())
+        if not np.isfinite(var) or var <= 1e-6:
+            return 1e6
+        return float(np.clip(1.0 / max(var, 1e-6), 0.0, 1e6))
+    except Exception:
+        return 1e6
+
+
+def _quality_gate(quality: Optional[Dict[str, float]],
+                  min_vis: float = APPMEM_MIN_VIS,
+                  min_side: float = APPMEM_MIN_SIDE,
+                  max_blur: float = APPMEM_MAX_BLUR) -> Tuple[bool, float]:
+    if quality is None:
+        return True, 1.0
+    try:
+        vis = float(quality.get("vis", 1.0))
+        side = float(quality.get("min_side", 0.0))
+        blur = float(quality.get("blur", 0.0))
+        conf = float(quality.get("conf", 1.0))
+    except Exception:
+        return False, 0.0
+    if vis < min_vis or side < min_side or blur > max_blur or conf < 0.30:
+        return False, 0.0
+    vis_score = float(np.clip((vis - min_vis) / max(1e-3, 1.0 - min_vis), 0.0, 1.0))
+    side_score = float(np.clip((side - min_side) / max(1.0, min_side), 0.0, 1.0))
+    blur_score = float(np.clip((max_blur - blur) / max(max_blur, 1e-3), 0.0, 1.0))
+    conf_score = float(np.clip((conf - 0.30) / 0.70, 0.0, 1.0))
+    weight = float(np.clip((vis_score + side_score + blur_score + conf_score) / 4.0, 0.0, 1.0))
+    if weight <= 0.0:
+        return False, 0.0
+    return True, weight
+
+
 def _compute_embeddings_for_dets(frame: np.ndarray,
                                  boxes: List[Tuple[float, float, float, float]],
                                  batch_size: int = 32,
                                  masks: Optional[List[Optional[np.ndarray]]] = None,
                                  force_builtin: bool = False
-                                 ) -> List[Optional[np.ndarray]]:
+                                 ) -> Tuple[List[Optional[np.ndarray]], List[Dict[str, float]]]:
     # Ensure ROI masks are available when segmentation enabled
     if SEG_ENABLE and boxes:
         need_masks = (
@@ -2613,11 +2699,22 @@ def _compute_embeddings_for_dets(frame: np.ndarray,
                 except Exception:
                     sr_inst = None
             crops: List[Optional[np.ndarray]] = []
+            qualities: List[Dict[str, float]] = [_default_quality() for _ in boxes]
             for i, b in enumerate(boxes):
                 pb = _pad_bbox(b, REID_PAD_RATIO, Ww, Hh)
                 roi = _safe_crop(frame, pb)
+                mask_i = masks[i] if (masks is not None and i < len(masks)) else None
+                vis = _mask_visibility(mask_i)
                 if MASK_GUIDED_EMB and masks is not None and i < len(masks) and masks[i] is not None:
                     roi = _apply_mask_to_crop(roi, masks[i])
+                if roi is not None and roi.size > 0:
+                    qual = {"vis": vis, "min_side": float(min(roi.shape[0], roi.shape[1])),
+                            "blur": _estimate_blur_metric(roi)}
+                    qualities[i] = qual
+                else:
+                    dq = _default_quality()
+                    dq["vis"] = vis
+                    qualities[i] = dq
                 if roi is not None and sr_inst is not None:
                     try:
                         roi_h, roi_w = roi.shape[:2]
@@ -2656,8 +2753,9 @@ def _compute_embeddings_for_dets(frame: np.ndarray,
                     sub_boxes = [boxes[i] for i in missing_idx]
                     sub_masks = [masks[i] if (masks is not None and i < len(masks)) else None for i in missing_idx]
                     try:
-                        sub_outs = _compute_embeddings_for_dets(frame, sub_boxes, batch_size=batch_size,
-                                                                masks=sub_masks, force_builtin=True)
+                        sub_outs, sub_quals = _compute_embeddings_for_dets(
+                            frame, sub_boxes, batch_size=batch_size,
+                            masks=sub_masks, force_builtin=True)
                         for k, i_idx in enumerate(missing_idx):
                             if k < len(sub_outs):
                                 v = sub_outs[k]
@@ -2666,27 +2764,43 @@ def _compute_embeddings_for_dets(frame: np.ndarray,
                                     if n > 1e-12:
                                         v = v / n
                                     outs[i_idx] = v
+                            if k < len(sub_quals):
+                                qualities[i_idx] = dict(sub_quals[k])
                     except Exception:
                         pass
-            return outs
+            return outs, qualities
     # Legacy/built-in path
     if _REID_MODEL is None or _REID_TF is None or _REID_DEV is None:
         ok = _init_reid_builtin_only() if force_builtin else _init_reid()
         if not ok or _REID_MODEL is None or _REID_TF is None or _REID_DEV is None:
-            return [None] * len(boxes)
+            return [None] * len(boxes), [_default_quality() for _ in boxes]
     if not boxes:
-        return []
+        return [], []
     imgs = []
     valids = []
+    qualities: List[Dict[str, float]] = []
     H, W = frame.shape[:2]
-    for b in boxes:
+    for i, b in enumerate(boxes):
         pb = _pad_bbox(b, REID_PAD_RATIO, W, H)
         roi = _safe_crop(frame, pb)
-        if roi is None:
+        mask_i = masks[i] if (masks is not None and i < len(masks)) else None
+        vis = _mask_visibility(mask_i)
+        if MASK_GUIDED_EMB and mask_i is not None:
+            roi = _apply_mask_to_crop(roi, mask_i)
+        if roi is None or roi.size == 0:
+            dq = _default_quality()
+            dq["vis"] = vis
+            qualities.append(dq)
             imgs.append(None)
             valids.append(False)
             continue
         try:
+            qual = {
+                "vis": vis,
+                "min_side": float(min(roi.shape[0], roi.shape[1])),
+                "blur": _estimate_blur_metric(roi)
+            }
+            qualities.append(qual)
             rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
             # Use PIL transforms when possible
             try:
@@ -2702,6 +2816,9 @@ def _compute_embeddings_for_dets(frame: np.ndarray,
         except Exception:
             imgs.append(None)
             valids.append(False)
+            dq = _default_quality()
+            dq["vis"] = vis
+            qualities.append(dq)
     # Batch forward
     outs: List[Optional[np.ndarray]] = [None] * len(boxes)
     if PROFILE_EMB:
@@ -2737,12 +2854,12 @@ def _compute_embeddings_for_dets(frame: np.ndarray,
     if PROFILE_EMB:
         import time as _t
         logger.debug("[emb] frame batch %s -> took %.3fs", len(boxes), (_t.time() - t0))
-    return outs
+    return outs, qualities
 
 
 def _compute_embedding(frame: np.ndarray, bbox: Tuple[float, float, float, float]) -> Optional[np.ndarray]:
     # Single box path, kept for ghost stitcher usage; uses padding
-    embs = _compute_embeddings_for_dets(frame, [bbox], batch_size=1)
+    embs, _ = _compute_embeddings_for_dets(frame, [bbox], batch_size=1)
     return embs[0] if embs else None
 
 
@@ -3038,7 +3155,7 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                 h, w = frame.shape[:2]
                 cx, cy = w // 2, h // 2
                 test_box = (cx - 32, cy - 64, cx + 32, cy + 64)
-                test = _compute_embeddings_for_dets(frame, [test_box], batch_size=1)
+                test, _ = _compute_embeddings_for_dets(frame, [test_box], batch_size=1)
                 tdim = 0 if (not test or test[0] is None) else int(test[0].size)
                 _diag_emit("reid_smoke", emb_dim=tdim, device=_reid_status.get("device"))
             except Exception as e:
@@ -3395,17 +3512,21 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                         det_hists.append(_compute_hsv_hist(frame, b))
             else:
                 det_hists = [None] * len(boxes_list)
-            det_embs = []
+            det_embs: List[Optional[np.ndarray]] = []
+            det_emb_q: List[Dict[str, float]] = []
             if APPEAR_EMB_ENABLE:
                 # compute embeddings only every N frames to save time
                 if REID_EVERY_N <= 1 or (frame_idx % REID_EVERY_N == 0):
                     # masked batch, function will ignore None masks
-                    det_embs = _compute_embeddings_for_dets(frame, boxes_list, REID_BATCH_SIZE, masks=(
-                        det_masks if (SEG_ENABLE and MASK_GUIDED_EMB) else None))
+                    det_embs, det_emb_q = _compute_embeddings_for_dets(
+                        frame, boxes_list, REID_BATCH_SIZE,
+                        masks=(det_masks if (SEG_ENABLE and MASK_GUIDED_EMB) else None))
                 else:
                     det_embs = [None] * len(boxes_list)
+                    det_emb_q = [_default_quality() for _ in boxes_list]
             else:
                 det_embs = [None] * len(boxes_list)
+                det_emb_q = [_default_quality() for _ in boxes_list]
 
             # Recompute masked features if needed (redundant safe-guard)
             if SEG_ENABLE and any(m is not None for m in det_masks):
@@ -3414,10 +3535,13 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                         if m is not None:
                             det_hists[i] = _compute_hsv_hist(frame, boxes_list[i], mask_roi=m)
                 if MASK_GUIDED_EMB and APPEAR_EMB_ENABLE:
-                    det_embs_masked = _compute_embeddings_for_dets(frame, boxes_list, REID_BATCH_SIZE, masks=det_masks)
+                    det_embs_masked, det_embs_q_masked = _compute_embeddings_for_dets(
+                        frame, boxes_list, REID_BATCH_SIZE, masks=det_masks)
                     for i, vec in enumerate(det_embs_masked):
                         if det_masks[i] is not None and vec is not None:
                             det_embs[i] = vec
+                            if i < len(det_embs_q_masked):
+                                det_emb_q[i] = dict(det_embs_q_masked[i])
 
             # After det_embs are computed, emit embedding yield diagnostics
             if DIAG and ((frame_idx + 1) % DIAG_EVERY == 0):
@@ -3436,10 +3560,24 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                 prev_next = next_tid
                 det_confs_list = detections.confidence.tolist() if detections.confidence is not None else [1.0] * len(
                     boxes_list)
+                if det_emb_q:
+                    for idx in range(min(len(det_emb_q), len(det_confs_list))):
+                        try:
+                            det_emb_q[idx]["conf"] = float(det_confs_list[idx])
+                        except Exception:
+                            det_emb_q[idx]["conf"] = float(det_confs_list[idx]) if idx < len(det_confs_list) else 1.0
+                        if det_vis is not None and idx < len(det_vis):
+                            try:
+                                vis_val = float(det_vis[idx])
+                                if np.isfinite(vis_val) and vis_val > 0.0:
+                                    det_emb_q[idx]["vis"] = float(min(det_emb_q[idx].get("vis", 1.0), vis_val))
+                            except Exception:
+                                pass
                 assigned_ids, state, next_tid, dropped_pairs, recovered_ids, id_switch_est = appearance_associate(
                     state, boxes_list, det_embs, det_hists, frame_idx, W, H, next_tid, cost_debug_acc, H_cam=H_cam,
                     fps=float(fps), det_confs=det_confs_list,
-                    tm=tm, det_masks=det_masks, det_mask_boxes=det_mask_boxes, det_vis=det_vis
+                    tm=tm, det_masks=det_masks, det_mask_boxes=det_mask_boxes, det_vis=det_vis,
+                    det_emb_quality=det_emb_q
                 )
             except Exception as e:
                 if DIAG:
@@ -3515,12 +3653,15 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                             det_hists = [None] * len(detections)
 
                         det_embs: List[Optional[np.ndarray]] = []
+                        det_emb_q_bt: List[Dict[str, float]] = []
                         if APPEAR_EMB_ENABLE:
                             # batched
                             boxes_list: List[Tuple[float, float, float, float]] = [tuple(x) for x in xyxy_now.tolist()]
-                            det_embs = _compute_embeddings_for_dets(frame, boxes_list, REID_BATCH_SIZE)
+                            det_embs, det_emb_q_bt = _compute_embeddings_for_dets(
+                                frame, boxes_list, REID_BATCH_SIZE)
                         else:
                             det_embs = [None] * len(detections)
+                            det_emb_q_bt = [_default_quality() for _ in range(len(detections))]
 
                         # Build candidate matches (det_idx, ghost_id, combined_sim, iou)
                         cands: List[Tuple[float, float, int, int]] = []  # (-combined_sim, -iou, det_idx, ghost_idx)
@@ -3533,7 +3674,16 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                             db = tuple(xyxy_now[det_idx].tolist())  # type: ignore
                             dcx, dcy = float(cx_now[det_idx]), float(cy_now[det_idx])
                             det_hist = det_hists[det_idx] if det_hists else None
-                            det_emb = det_embs[det_idx] if det_embs else None
+                            quality_bt = None
+                            if det_emb_q_bt and det_idx < len(det_emb_q_bt):
+                                quality_bt = dict(det_emb_q_bt[det_idx])
+                                if detections.confidence is not None and det_idx < len(detections.confidence):
+                                    try:
+                                        quality_bt["conf"] = float(detections.confidence[det_idx])
+                                    except Exception:
+                                        pass
+                            quality_bt_ok, quality_bt_weight = _quality_gate(quality_bt)
+                            det_emb = det_embs[det_idx] if (quality_bt_ok and det_embs) else None
                             for ghost_idx, (gid, gb, (gcx, gcy), ghost_hist, ghost_emb) in enumerate(ghost_preds):
                                 iou = _iou_xyxy(db, gb)
                                 if iou < float(ID_REASSIGN_IOU):
@@ -3543,6 +3693,8 @@ def run_tracking_with_supervision() -> Dict[str, Any]:
                                     continue
                                 # Embedding similarity (preferred)
                                 emb_sim = _cosine_sim(det_emb, ghost_emb)
+                                if emb_sim is not None and quality_bt_weight < 1.0:
+                                    emb_sim *= quality_bt_weight
                                 if emb_sim is not None and emb_sim < APPEAR_EMB_MIN_SIM:
                                     continue
                                 # Histogram similarity (fallback/aux)

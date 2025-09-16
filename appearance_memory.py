@@ -54,6 +54,20 @@ class AppearanceMemory:
             return False
         return True
 
+    def _quality_weight(self, q: Dict) -> float:
+        try:
+            vis = float(q.get("vis", 1.0))
+            side = float(q.get("min_side", 0.0))
+            blur = float(q.get("blur", 0.0))
+            conf = float(q.get("conf", 1.0))
+        except Exception:
+            return 0.0
+        vis_score = float(np.clip((vis - self.min_vis) / max(1e-3, 1.0 - self.min_vis), 0.0, 1.0))
+        side_score = float(np.clip((side - self.min_side) / max(1.0, self.min_side), 0.0, 1.0))
+        blur_score = float(np.clip((self.max_blur - blur) / max(self.max_blur, 1e-3), 0.0, 1.0))
+        conf_score = float(np.clip((conf - 0.30) / 0.70, 0.0, 1.0))
+        return float(np.clip((vis_score + side_score + blur_score + conf_score) / 4.0, 0.0, 1.0))
+
     def _clamp_angle(self, m: np.ndarray, z: np.ndarray, max_deg: float = 20.0) -> np.ndarray:
         # Return an adjusted target vector so that angle between m and target <= max_deg
         if m is None or m.size == 0:
@@ -81,6 +95,9 @@ class AppearanceMemory:
             return self.get(tid)
         if not self._quality_ok(quality):
             return self.get(tid)
+        weight = self._quality_weight(quality)
+        if weight <= 0.0:
+            return self.get(tid)
         z = z_t.astype(np.float32)
         n = float(np.linalg.norm(z))
         if n > 1e-12:
@@ -92,14 +109,15 @@ class AppearanceMemory:
             self._m[tid] = z
         else:
             target = self._clamp_angle(m_prev, z, max_deg=20.0)
-            m_new = (1.0 - self.alpha) * m_prev + self.alpha * target
+            alpha_eff = float(np.clip(self.alpha * weight, 0.0, 1.0))
+            m_new = (1.0 - alpha_eff) * m_prev + alpha_eff * target
             nn = float(np.linalg.norm(m_new))
             if nn > 1e-12:
                 m_new = m_new / nn
             self._m[tid] = m_new.astype(np.float32)
         # update prototypes by simple quality score (vis * conf * side)
         protos = self._protos.get(tid, [])
-        score = float(quality.get("vis", 0.0)) * float(quality.get("conf", 1.0)) * max(1.0, float(quality.get("min_side", 0.0)))
+        score = weight * float(quality.get("vis", 0.0)) * float(quality.get("conf", 1.0)) * max(1.0, float(quality.get("min_side", 0.0)))
         protos.append((score, z))
         protos = sorted(protos, key=lambda x: -x[0])[:max(1, self.k_protos)]
         self._protos[tid] = protos
