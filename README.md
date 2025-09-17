@@ -17,6 +17,17 @@ pipeline.
 python -m cli --log-level DEBUG
 ```
 
+## Installation
+
+Install the minimal runtime dependencies before using the library:
+
+```bash
+pip install -r requirements.txt
+```
+
+The tests also expect these packages to be available. They previously failed
+with `ModuleNotFoundError` because the dependencies were missing.
+
 ## Thread Safety
 
 `ReIDExtractor` maintains a shared PCA cache that is protected by a
