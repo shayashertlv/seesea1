@@ -14,35 +14,54 @@ logger = logging.getLogger(__name__)
 _logged = False
 _sam_predictor: Optional[Any] = None
 _sam_predictor_failed = False
+_sam_predictor_failure_reason: Optional[str] = None
 
 
 def _get_sam_predictor() -> Optional[Any]:
-    global _sam_predictor_failed, _sam_predictor
+    global _sam_predictor_failed, _sam_predictor, _sam_predictor_failure_reason, _logged
     if _sam_predictor is not None:
         return _sam_predictor
     if _sam_predictor_failed:
+        if not _logged and _sam_predictor_failure_reason:
+            logger.warning("[seg] SAM2 predictor unavailable: %s", _sam_predictor_failure_reason)
+            _logged = True
         return None
     predictor = _build_sam_predictor()
     if predictor is None:
         _sam_predictor_failed = True
+        if not _logged and _sam_predictor_failure_reason:
+            logger.warning("[seg] SAM2 predictor unavailable: %s", _sam_predictor_failure_reason)
+            _logged = True
         return None
     _sam_predictor = predictor
     return _sam_predictor
 
 
 def _build_sam_predictor() -> Optional[Any]:
+    global _sam_predictor_failure_reason
     module_names = ("sam2", "segment_anything")
+    last_error: Optional[str] = None
     for name in module_names:
         try:
             module = importlib.import_module(name)
-        except Exception:
+        except Exception as exc:
+            logger.debug("SAM2 import failed for '%s': %s", name, exc)
+            last_error = f"import '{name}' failed: {exc}"
             continue
         try:
             predictor = _instantiate_predictor(module)
-        except Exception:
+        except Exception as exc:
+            logger.exception("SAM2 predictor builder from '%s' raised an exception", name)
+            _sam_predictor_failure_reason = f"builder from '{name}' raised {exc.__class__.__name__}: {exc}"
             return None
         if predictor is not None:
+            logger.debug("SAM2 predictor instantiated via '%s'", name)
+            _sam_predictor_failure_reason = None
             return predictor
+    if last_error and not _sam_predictor_failure_reason:
+        _sam_predictor_failure_reason = last_error
+    if not _sam_predictor_failure_reason:
+        _sam_predictor_failure_reason = "no compatible SAM2/Segment-Anything builder found"
     return None
 
 
@@ -70,6 +89,7 @@ def _instantiate_predictor(module: Any) -> Optional[Any]:
                 try:
                     predictor = builder(**call_kwargs)
                 except TypeError:
+                    logger.debug("SAM2 builder '%s.%s' rejected kwargs %s", module.__name__, attr, call_kwargs)
                     continue
                 except Exception:
                     raise
@@ -90,6 +110,7 @@ def _instantiate_predictor(module: Any) -> Optional[Any]:
             try:
                 predictor = cls(**call_kwargs)
             except TypeError:
+                logger.debug("SAM2 class '%s.%s' rejected kwargs %s", module.__name__, attr, call_kwargs)
                 continue
             except Exception:
                 raise
