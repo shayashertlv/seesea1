@@ -120,16 +120,18 @@ if HAS_TORCH:
             logv = self.head_logvar(h_last)
             return delta, cont, score, logv
 
-        def _app_mem_from_seq(self, reid_seq: list, hist_seq: list):
+        def _app_mem_from_seq(self, reid_seq: list, hist_seq: list, proto_seq: Optional[list] = None):
             """
-            Build a compact appearance memory vector from short sequences of reid/hist.
+            Build a compact appearance memory vector from short sequences of reid/hist
+            and an optional prototype queue.
             Lazy-creates a 1-layer GRU and a linear projection to keep footprint tiny.
             Returns a torch.Tensor of shape (1, H) on self.device, or None if not available.
             """
             if not getattr(self, "appear_enable", True):
                 return None
             try:
-                T = max(len(reid_seq or []), len(hist_seq or []))
+                proto_seq = proto_seq or []
+                T = max(len(reid_seq or []), len(hist_seq or []), len(proto_seq or []))
                 if T <= 0:
                     return None
 
@@ -137,6 +139,10 @@ if HAS_TORCH:
                 Xs = []
                 # Determine dims (dynamic; we’ll adapt on the fly)
                 r_dim = int((reid_seq[0].size if (reid_seq and isinstance(reid_seq[0], np.ndarray)) else 0))
+                if r_dim == 0 and proto_seq:
+                    first_proto = next((p for p in proto_seq if isinstance(p, np.ndarray) and p.size > 0), None)
+                    if first_proto is not None:
+                        r_dim = int(first_proto.size)
                 h_dim = int((hist_seq[0].size if (hist_seq and isinstance(hist_seq[0], np.ndarray)) else 0))
                 if r_dim == 0 and h_dim == 0:
                     return None
@@ -144,12 +150,30 @@ if HAS_TORCH:
                 for i in range(T):
                     r = reid_seq[i] if (reid_seq and i < len(reid_seq)) else None
                     h = hist_seq[i] if (hist_seq and i < len(hist_seq)) else None
+                    if r is None and proto_seq and i < len(proto_seq):
+                        cand = proto_seq[i]
+                        if isinstance(cand, np.ndarray) and cand.size > 0:
+                            r = cand
                     if r is None and h is None:
                         continue
                     if r is None:
                         r = np.zeros((r_dim,), np.float32)
+                    elif r.size != r_dim and r_dim > 0:
+                        if r.size > r_dim:
+                            r = r[:r_dim]
+                        else:
+                            pad_r = np.zeros((r_dim,), np.float32)
+                            pad_r[:r.size] = r.astype(np.float32)
+                            r = pad_r
                     if h is None:
                         h = np.zeros((h_dim,), np.float32)
+                    elif h.size != h_dim and h_dim > 0:
+                        if h.size > h_dim:
+                            h = h[:h_dim]
+                        else:
+                            pad_h = np.zeros((h_dim,), np.float32)
+                            pad_h[:h.size] = h.astype(np.float32)
+                            h = pad_h
                     Xs.append(np.concatenate([r.astype(np.float32), h.astype(np.float32)], axis=0))
 
                 if not Xs:
@@ -186,6 +210,8 @@ if HAS_TORCH:
                 hist = track_window.get('hist', None)
                 reid_seq = track_window.get('reid_seq', []) or []
                 hist_seq = track_window.get('hist_seq', []) or []
+                proto_seq = track_window.get('proto_seq',
+                                             track_window.get('appearance_prototypes', [])) or []
 
                 # Require at least 2 timesteps
                 if centers is None or len(centers) < 2:
@@ -249,7 +275,7 @@ if HAS_TORCH:
                     d, c, s, logv = self.forward(X, rv, hv)
 
                 # Build appearance memory from short sequences and fuse into reid channel
-                app_mem = self._app_mem_from_seq(reid_seq, hist_seq)
+                app_mem = self._app_mem_from_seq(reid_seq, hist_seq, proto_seq)
                 if app_mem is not None:
                     if rv is not None:
                         rv = torch.cat([rv, app_mem], dim=1)
