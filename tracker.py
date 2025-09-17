@@ -2976,14 +2976,25 @@ def _compute_embeddings_for_dets(frame: np.ndarray,
             qualities.append(qual)
             rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
             # Use PIL transforms when possible
-            try:
-                if HAS_PIL and Image is not None:
+            ten = None
+            pil_exc: Optional[Exception] = None
+            if HAS_PIL and Image is not None:
+                try:
                     pil = Image.fromarray(rgb)
                     ten = _REID_TF(pil)  # Resize->ToTensor->Normalize if OSNet path
-                else:
-                    raise RuntimeError("force numpy path")
-            except Exception:
-                ten = _to_tensor_rgb(rgb, _REID_INPUT_SIZE)
+                except Exception as exc:
+                    pil_exc = exc
+                    ten = None
+            if ten is None:
+                try:
+                    tens = torch.from_numpy(rgb).permute(2, 0, 1)
+                    if tens.dtype != torch.float32:
+                        tens = tens.float().div(255.0)
+                    ten = _REID_TF(tens)
+                except Exception:
+                    if pil_exc is not None:
+                        logger.debug("[emb] PIL transform failed: %s", pil_exc)
+                    ten = _to_tensor_rgb(rgb, _REID_INPUT_SIZE)
             imgs.append(ten)
             valids.append(True)
         except Exception:
