@@ -2405,10 +2405,15 @@ def _init_reid():
             try:
                 _REID_PLUG = _PluggableReID(backend=REID_BACKBONE, device=REID_DEVICE, fp16=REID_FP16)
                 return True
-            except Exception as e:
-                logger.warning("[sv-pipeline] warning: ReID backend failed to load, falling back to OSNet")
+            except Exception as exc:  # pragma: no cover - logging path
+                logger.warning(
+                    "[sv-pipeline] ReID backend '%s' failed to load (%s); falling back to builtin weights",
+                    getattr(_PluggableReID, "__name__", str(_PluggableReID)), exc,
+                    exc_info=True,
+                )
+                _REID_PLUG = None
     except Exception:
-        pass
+        logger.debug("[sv-pipeline] unexpected error while probing pluggable ReID backend", exc_info=True)
     try:
         dev_str = _select_device_from_env()
         dev = torch.device(dev_str)
