@@ -14,23 +14,31 @@ logger = logging.getLogger(__name__)
 _logged = False
 _mask2former_predictor: Optional[Any] = None
 _mask2former_failed = False
+_mask2former_failure_reason: Optional[str] = None
 
 
 def _get_mask2former_predictor() -> Optional[Any]:
-    global _mask2former_failed, _mask2former_predictor
+    global _mask2former_failed, _mask2former_predictor, _mask2former_failure_reason, _logged
     if _mask2former_predictor is not None:
         return _mask2former_predictor
     if _mask2former_failed:
+        if not _logged and _mask2former_failure_reason:
+            logger.warning("[seg] Mask2Former predictor unavailable: %s", _mask2former_failure_reason)
+            _logged = True
         return None
     predictor = _build_mask2former_predictor()
     if predictor is None:
         _mask2former_failed = True
+        if not _logged and _mask2former_failure_reason:
+            logger.warning("[seg] Mask2Former predictor unavailable: %s", _mask2former_failure_reason)
+            _logged = True
         return None
     _mask2former_predictor = predictor
     return _mask2former_predictor
 
 
 def _build_mask2former_predictor() -> Optional[Any]:
+    global _mask2former_failure_reason
     factory_path = os.getenv("SEG_MASK2FORMER_FACTORY")
     if factory_path:
         try:
@@ -39,8 +47,12 @@ def _build_mask2former_predictor() -> Optional[Any]:
             factory = getattr(factory_module, attr)
             predictor = factory() if callable(factory) else factory
             if predictor is not None:
+                logger.debug("Mask2Former predictor created via factory '%s'", factory_path)
+                _mask2former_failure_reason = None
                 return predictor
-        except Exception:
+        except Exception as exc:
+            logger.exception("Mask2Former factory '%s' raised an exception", factory_path)
+            _mask2former_failure_reason = f"factory '{factory_path}' failed with {exc.__class__.__name__}: {exc}"
             return None
     module_names = ["detectron2"]
     module_names.extend([
@@ -49,18 +61,29 @@ def _build_mask2former_predictor() -> Optional[Any]:
         "detectron2.engine.defaults",
     ])
     modules = []
+    last_error: Optional[str] = None
     for name in module_names:
         try:
             modules.append(importlib.import_module(name))
-        except Exception:
+        except Exception as exc:
+            logger.debug("Mask2Former import failed for '%s': %s", name, exc)
+            last_error = f"import '{name}' failed: {exc}"
             continue
     for module in modules:
         try:
             predictor = _instantiate_predictor(module)
-        except Exception:
+        except Exception as exc:
+            logger.exception("Mask2Former predictor builder from '%s' raised an exception", module.__name__)
+            _mask2former_failure_reason = f"builder from '{module.__name__}' raised {exc.__class__.__name__}: {exc}"
             return None
         if predictor is not None:
+            logger.debug("Mask2Former predictor instantiated via '%s'", module.__name__)
+            _mask2former_failure_reason = None
             return predictor
+    if last_error and not _mask2former_failure_reason:
+        _mask2former_failure_reason = last_error
+    if not _mask2former_failure_reason:
+        _mask2former_failure_reason = "no compatible Mask2Former builder found"
     return None
 
 
@@ -77,6 +100,7 @@ def _instantiate_predictor(module: Any) -> Optional[Any]:
             try:
                 predictor = builder()
             except TypeError:
+                logger.debug("Mask2Former builder '%s.%s' rejected default kwargs", module.__name__, attr)
                 continue
             except Exception:
                 raise
@@ -94,6 +118,7 @@ def _instantiate_predictor(module: Any) -> Optional[Any]:
         try:
             predictor = cls()
         except TypeError:
+            logger.debug("Mask2Former class '%s.%s' rejected default kwargs", module.__name__, attr)
             continue
         except Exception:
             raise
