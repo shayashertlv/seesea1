@@ -1,7 +1,6 @@
 import importlib
-import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Tuple, Optional
 
 import cv2
 import numpy as np
@@ -15,79 +14,34 @@ logger = logging.getLogger(__name__)
 _logged = False
 _mask2former_predictor: Optional[Any] = None
 _mask2former_failed = False
-_mask2former_failure_reason: Optional[str] = None
 
 
 def _get_mask2former_predictor() -> Optional[Any]:
-    global _mask2former_failed, _mask2former_predictor, _mask2former_failure_reason, _logged
+    global _mask2former_failed, _mask2former_predictor
     if _mask2former_predictor is not None:
         return _mask2former_predictor
     if _mask2former_failed:
-        if not _logged and _mask2former_failure_reason:
-            logger.warning("[seg] Mask2Former predictor unavailable: %s", _mask2former_failure_reason)
-            _logged = True
         return None
     predictor = _build_mask2former_predictor()
     if predictor is None:
         _mask2former_failed = True
-        if not _logged and _mask2former_failure_reason:
-            logger.warning("[seg] Mask2Former predictor unavailable: %s", _mask2former_failure_reason)
-            _logged = True
         return None
     _mask2former_predictor = predictor
     return _mask2former_predictor
 
 
-def _load_factory(factory_path: str) -> Optional[Any]:
-    global _mask2former_failure_reason
-    try:
-        module_name, attr = factory_path.rsplit(":", 1)
-    except ValueError as exc:
-        _mask2former_failure_reason = f"invalid factory '{factory_path}': {exc}"
-        logger.error("Mask2Former factory path '%s' is invalid", factory_path)
-        return None
-    try:
-        factory_module = importlib.import_module(module_name)
-    except Exception as exc:
-        _mask2former_failure_reason = f"import '{module_name}' failed: {exc}"
-        logger.exception("Mask2Former factory module '%s' import failed", module_name)
-        return None
-    factory = getattr(factory_module, attr, None)
-    if factory is None:
-        _mask2former_failure_reason = f"factory '{factory_path}' not found"
-        logger.error("Mask2Former factory attribute '%s' missing in module '%s'", attr, module_name)
-        return None
-    kwargs: Dict[str, Any] = {}
-    args_env = os.getenv("SEG_MASK2FORMER_ARGS")
-    if args_env:
-        try:
-            parsed = json.loads(args_env)
-            if not isinstance(parsed, dict):
-                raise TypeError("SEG_MASK2FORMER_ARGS must decode to a JSON object")
-            kwargs.update(parsed)
-        except Exception as exc:
-            logger.warning("Mask2Former factory args parsing failed: %s", exc)
-    try:
-        predictor = factory(**kwargs) if callable(factory) else factory
-    except Exception as exc:
-        _mask2former_failure_reason = f"factory '{factory_path}' raised {exc.__class__.__name__}: {exc}"
-        logger.exception("Mask2Former factory '%s' raised an exception", factory_path)
-        return None
-    if predictor is not None:
-        logger.debug("Mask2Former predictor created via factory '%s'", factory_path)
-        _mask2former_failure_reason = None
-    else:
-        _mask2former_failure_reason = f"factory '{factory_path}' returned None"
-    return predictor
-
-
 def _build_mask2former_predictor() -> Optional[Any]:
-    global _mask2former_failure_reason
     factory_path = os.getenv("SEG_MASK2FORMER_FACTORY")
     if factory_path:
-        predictor = _load_factory(factory_path)
-        if predictor is not None:
-            return predictor
+        try:
+            module_name, attr = factory_path.rsplit(":", 1)
+            factory_module = importlib.import_module(module_name)
+            factory = getattr(factory_module, attr)
+            predictor = factory() if callable(factory) else factory
+            if predictor is not None:
+                return predictor
+        except Exception:
+            return None
     module_names = ["detectron2"]
     module_names.extend([
         "detectron2.projects.mask2former",  # common extension location
@@ -95,29 +49,18 @@ def _build_mask2former_predictor() -> Optional[Any]:
         "detectron2.engine.defaults",
     ])
     modules = []
-    last_error: Optional[str] = None
     for name in module_names:
         try:
             modules.append(importlib.import_module(name))
-        except Exception as exc:
-            logger.debug("Mask2Former import failed for '%s': %s", name, exc)
-            last_error = f"import '{name}' failed: {exc}"
+        except Exception:
             continue
     for module in modules:
         try:
             predictor = _instantiate_predictor(module)
-        except Exception as exc:
-            logger.exception("Mask2Former predictor builder from '%s' raised an exception", module.__name__)
-            _mask2former_failure_reason = f"builder from '{module.__name__}' raised {exc.__class__.__name__}: {exc}"
+        except Exception:
             return None
         if predictor is not None:
-            logger.debug("Mask2Former predictor instantiated via '%s'", module.__name__)
-            _mask2former_failure_reason = None
             return predictor
-    if last_error and not _mask2former_failure_reason:
-        _mask2former_failure_reason = last_error
-    if not _mask2former_failure_reason:
-        _mask2former_failure_reason = "no compatible Mask2Former builder found"
     return None
 
 
@@ -134,7 +77,6 @@ def _instantiate_predictor(module: Any) -> Optional[Any]:
             try:
                 predictor = builder()
             except TypeError:
-                logger.debug("Mask2Former builder '%s.%s' rejected default kwargs", module.__name__, attr)
                 continue
             except Exception:
                 raise
@@ -152,7 +94,6 @@ def _instantiate_predictor(module: Any) -> Optional[Any]:
         try:
             predictor = cls()
         except TypeError:
-            logger.debug("Mask2Former class '%s.%s' rejected default kwargs", module.__name__, attr)
             continue
         except Exception:
             raise

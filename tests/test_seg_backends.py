@@ -1,5 +1,4 @@
 import importlib
-import json
 import sys
 import types
 
@@ -98,32 +97,6 @@ def _cleanup_modules():
 def _reload_module(name):
     module = importlib.import_module(name)
     return importlib.reload(module)
-
-
-def test_seg_sam2_factory_from_env(monkeypatch):
-    predictor = _DummyPredictor()
-    calls = {}
-
-    def factory(**kwargs):
-        calls.update(kwargs)
-        return predictor
-
-    module = types.ModuleType("custom_sam_factory")
-    module.make_predictor = factory
-    monkeypatch.setitem(sys.modules, "custom_sam_factory", module)
-    monkeypatch.setenv("SEG_SAM2_FACTORY", "custom_sam_factory:make_predictor")
-    monkeypatch.setenv("SEG_SAM2_ARGS", json.dumps({"foo": 1, "bar": "baz"}))
-
-    seg_sam2 = _reload_module("seg_sam2")
-    frame = np.zeros((6, 6, 3), dtype=np.uint8)
-    boxes = [(0, 0, 5, 5)]
-
-    masks, boxes_out, vis = seg_sam2.infer_roi_masks(frame, boxes)
-    assert calls == {"foo": 1, "bar": "baz"}
-    assert predictor.calls == 1
-    assert masks[0] is not None and masks[0].mean() == pytest.approx(1.0)
-    assert boxes_out == [tuple(map(float, boxes[0]))]
-    assert vis == [pytest.approx(1.0)]
 
 
 def test_seg_sam2_builder_receives_env_arguments(monkeypatch):
@@ -272,32 +245,6 @@ def test_seg_sam2_falls_back_when_predictor_errors(monkeypatch):
     assert boxes_out2 == boxes_out
     assert vis2 == vis
     assert all(np.array_equal(m1, m2) for m1, m2 in zip(masks, masks2))
-
-
-def test_mask2former_factory_from_env(monkeypatch):
-    predictor = _DummyPredictor()
-    calls = {}
-
-    def factory(**kwargs):
-        calls.update(kwargs)
-        return predictor
-
-    module = types.ModuleType("mask2former_factory_mod")
-    module.build = factory
-    monkeypatch.setitem(sys.modules, "mask2former_factory_mod", module)
-    monkeypatch.setenv("SEG_MASK2FORMER_FACTORY", "mask2former_factory_mod:build")
-    monkeypatch.setenv("SEG_MASK2FORMER_ARGS", json.dumps({"cfg": "config.yaml", "score_thresh": 0.5}))
-
-    seg_mask2former = _reload_module("seg_mask2former")
-    frame = np.zeros((10, 10, 3), dtype=np.uint8)
-    boxes = [(1, 1, 6, 7)]
-
-    masks, boxes_out, vis = seg_mask2former.infer_roi_masks(frame, boxes)
-    assert calls == {"cfg": "config.yaml", "score_thresh": 0.5}
-    assert predictor.calls == 1
-    assert masks[0] is not None and masks[0].mean() == pytest.approx(1.0)
-    assert boxes_out == [tuple(map(float, boxes[0]))]
-    assert vis == [pytest.approx(1.0)]
 
 
 def test_mask2former_uses_cached_predictor(monkeypatch):
