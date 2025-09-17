@@ -6,6 +6,35 @@ import numpy as np
 import pytest
 
 
+class _FakeCV2:
+    INTER_NEAREST = 0
+
+    @staticmethod
+    def resize(arr, size, interpolation=None):
+        target_w, target_h = size
+        arr_np = np.asarray(arr)
+        if arr_np.ndim == 0:
+            return arr_np
+        src_h, src_w = arr_np.shape[:2]
+        if src_h == 0 or src_w == 0:
+            return arr_np
+        row_idx = np.clip(
+            np.round(np.linspace(0, src_h - 1, target_h)).astype(int),
+            0,
+            src_h - 1,
+        )
+        col_idx = np.clip(
+            np.round(np.linspace(0, src_w - 1, target_w)).astype(int),
+            0,
+            src_w - 1,
+        )
+        resized = arr_np[row_idx][:, col_idx]
+        return resized.astype(arr_np.dtype, copy=False)
+
+
+sys.modules.setdefault("cv2", _FakeCV2())
+
+
 def _make_dummy_masks(frame_bgr, boxes):
     h, w = frame_bgr.shape[:2]
     masks = []
@@ -54,6 +83,7 @@ def _cleanup_modules():
             "detectron2.engine.defaults",
             "seg_sam2",
             "seg_mask2former",
+            "cv2",
         ]
     }
     yield
@@ -67,6 +97,80 @@ def _cleanup_modules():
 def _reload_module(name):
     module = importlib.import_module(name)
     return importlib.reload(module)
+
+
+def test_seg_sam2_builder_receives_env_arguments(monkeypatch):
+    dummy = types.SimpleNamespace()
+    predictor = _DummyPredictor()
+    builder_args = {}
+
+    def builder(*, checkpoint, model_type):
+        builder_args["checkpoint"] = checkpoint
+        builder_args["model_type"] = model_type
+        return predictor
+
+    dummy.build_sam2_predictor = builder
+    monkeypatch.setitem(sys.modules, "sam2", dummy)
+    monkeypatch.setenv("SAM2_CHECKPOINT", "sam2/path.pt")
+    monkeypatch.setenv("SAM_MODEL_TYPE", "vit_h")
+
+    seg_sam2 = _reload_module("seg_sam2")
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    boxes = [(1, 1, 4, 5)]
+
+    masks, boxes_out, vis = seg_sam2.infer_roi_masks(frame, boxes)
+    assert builder_args == {"checkpoint": "sam2/path.pt", "model_type": "vit_h"}
+    assert masks[0] is not None and masks[0].mean() == pytest.approx(1.0)
+    assert boxes_out == [tuple(map(float, boxes[0]))]
+    assert vis == [pytest.approx(1.0)]
+
+
+def test_seg_sam2_env_arguments_when_builder_fails(monkeypatch):
+    dummy = types.SimpleNamespace()
+    builder_args = {"count": 0}
+
+    def builder(*, checkpoint, model_type=None):
+        builder_args["count"] += 1
+        builder_args["checkpoint"] = checkpoint
+        builder_args["model_type"] = model_type
+        raise RuntimeError("cannot build")
+
+    dummy.build_sam2_predictor = builder
+    monkeypatch.setitem(sys.modules, "sam2", dummy)
+    monkeypatch.delenv("SAM2_CHECKPOINT", raising=False)
+    monkeypatch.setenv("SAM_CHECKPOINT", "legacy/model.pth")
+    monkeypatch.setenv("SAM_MODEL_TYPE", "vit_b")
+
+    seg_sam2 = _reload_module("seg_sam2")
+
+    fallback_mask = np.ones((6, 6), dtype=np.uint8)
+    fallback_calls = {"count": 0}
+
+    def fake_grabcut(frame, box):
+        fallback_calls["count"] += 1
+        return fallback_mask.copy(), 0.4
+
+    monkeypatch.setattr(seg_sam2, "_grabcut_roi", fake_grabcut)
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    boxes = [(2, 2, 7, 8)]
+
+    masks, boxes_out, vis = seg_sam2.infer_roi_masks(frame, boxes)
+    assert builder_args == {
+        "count": 1,
+        "checkpoint": "legacy/model.pth",
+        "model_type": "vit_b",
+    }
+    assert fallback_calls["count"] == 1
+    assert masks[0].shape == fallback_mask.shape
+    assert boxes_out == [tuple(map(float, boxes[0]))]
+    assert vis == [pytest.approx(0.4)]
+
+    masks2, boxes_out2, vis2 = seg_sam2.infer_roi_masks(frame, boxes)
+    assert builder_args["count"] == 1  # heavy path skipped after failure
+    assert fallback_calls["count"] == 2
+    assert boxes_out2 == boxes_out
+    assert vis2 == vis
+    assert np.array_equal(masks2[0], masks[0])
 
 
 def test_seg_sam2_uses_cached_predictor(monkeypatch):
