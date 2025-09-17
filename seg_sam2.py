@@ -1,4 +1,5 @@
 import importlib
+import os
 from typing import Any, List, Tuple, Optional
 
 import cv2
@@ -46,6 +47,14 @@ def _build_sam_predictor() -> Optional[Any]:
 
 
 def _instantiate_predictor(module: Any) -> Optional[Any]:
+    checkpoint = os.environ.get("SAM2_CHECKPOINT") or os.environ.get("SAM_CHECKPOINT")
+    model_type = os.environ.get("SAM_MODEL_TYPE")
+    env_kwargs = {}
+    if checkpoint:
+        env_kwargs["checkpoint"] = checkpoint
+    if model_type:
+        env_kwargs["model_type"] = model_type
+
     builder_names = (
         "build_sam2_predictor",
         "build_sam_predictor",
@@ -56,14 +65,16 @@ def _instantiate_predictor(module: Any) -> Optional[Any]:
     for attr in builder_names:
         builder = getattr(module, attr, None)
         if callable(builder):
-            try:
-                predictor = builder()
-            except TypeError:
-                continue
-            except Exception:
-                raise
-            if predictor is not None:
-                return predictor
+            call_kwargs_seq = [env_kwargs, {}] if env_kwargs else [{}]
+            for call_kwargs in call_kwargs_seq:
+                try:
+                    predictor = builder(**call_kwargs)
+                except TypeError:
+                    continue
+                except Exception:
+                    raise
+                if predictor is not None:
+                    return predictor
     class_names = (
         "Sam2ImagePredictor",
         "Sam2Predictor",
@@ -74,14 +85,16 @@ def _instantiate_predictor(module: Any) -> Optional[Any]:
         cls = getattr(module, attr, None)
         if cls is None:
             continue
-        try:
-            predictor = cls()
-        except TypeError:
-            continue
-        except Exception:
-            raise
-        if predictor is not None:
-            return predictor
+        call_kwargs_seq = [env_kwargs, {}] if env_kwargs else [{}]
+        for call_kwargs in call_kwargs_seq:
+            try:
+                predictor = cls(**call_kwargs)
+            except TypeError:
+                continue
+            except Exception:
+                raise
+            if predictor is not None:
+                return predictor
     return None
 
 
