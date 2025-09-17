@@ -442,7 +442,7 @@ SEG_DEBUG_DRAW = int(os.getenv("SEG_DEBUG_DRAW", "0")) == 1
 
 # Appearance memory (EMA) envs
 APPMEM_ENABLE = int(os.getenv("APPMEM_ENABLE", "1")) == 1
-APPMEM_BACKEND = os.getenv("APPMEM_BACKEND", "ema").strip()
+APPMEM_BACKEND = os.getenv("APPMEM_BACKEND", "queue").strip()
 APPMEM_ON_CONFLICT = int(os.getenv("APPMEM_ON_CONFLICT", "1")) == 1
 APPMEM_ALPHA = float(os.getenv("APPMEM_ALPHA", "0.20"))
 APPMEM_SWITCH_MARGIN = float(os.getenv("APPMEM_SWITCH_MARGIN", "0.08"))
@@ -450,6 +450,10 @@ APPMEM_FREEZE_AFTER_SWITCH = int(os.getenv("APPMEM_FREEZE_AFTER_SWITCH", "5"))
 APPMEM_MIN_VIS = float(os.getenv("APPMEM_MIN_VIS", "0.25"))
 APPMEM_MIN_SIDE = int(os.getenv("APPMEM_MIN_SIDE", "64"))
 APPMEM_MAX_BLUR = float(os.getenv("APPMEM_MAX_BLUR", "2.0"))
+APPMEM_TIME_DECAY = float(os.getenv("APPMEM_TIME_DECAY", "45.0"))
+APPMEM_MAX_AGE = int(os.getenv("APPMEM_MAX_AGE", "180"))
+APPMEM_K = int(os.getenv("APPMEM_K", "6"))
+APPMEM_CLUSTER_SIM = float(os.getenv("APPMEM_CLUSTER_SIM", "0.92"))
 
 # Super-resolution for small ReID crops
 SR_REID_ENABLE = int(os.getenv("SR_REID_ENABLE", "1")) == 1
@@ -517,6 +521,24 @@ GLOBAL_REID_BANK_TOPK = int(os.getenv("GLOBAL_REID_BANK_TOPK", "5"))
 GLOBAL_REID_BANK_SIM_THR = float(os.getenv("GLOBAL_REID_BANK_SIM_THR", "0.78"))
 GLOBAL_REID_BANK_HIST_THR = float(os.getenv("GLOBAL_REID_BANK_HIST_THR", "0.55"))
 GLOBAL_REID_BANK_BACKEND = os.getenv("GLOBAL_REID_BANK_BACKEND", "auto").strip()
+
+if AppearanceMemory is not None and APPMEM_ENABLE:
+    appearance_memory = AppearanceMemory(
+        backend=APPMEM_BACKEND or "queue",
+        alpha=APPMEM_ALPHA,
+        k_protos=max(1, APPMEM_K),
+        min_vis=APPMEM_MIN_VIS,
+        min_side=APPMEM_MIN_SIDE,
+        max_blur=APPMEM_MAX_BLUR,
+        on_conflict_only=APPMEM_ON_CONFLICT,
+        switch_margin=APPMEM_SWITCH_MARGIN,
+        freeze_after_switch=APPMEM_FREEZE_AFTER_SWITCH,
+        time_decay=APPMEM_TIME_DECAY,
+        max_age=APPMEM_MAX_AGE,
+        cluster_sim=APPMEM_CLUSTER_SIM,
+    )
+else:
+    appearance_memory = None
 
 if GLOBAL_REID_BANK_ENABLE and APPEAR_EMB_ENABLE and GlobalReIDBank is not None:
     try:
@@ -1219,6 +1241,14 @@ def appearance_associate(
                         reid_seq = []
                         hist_seq = []
 
+                    if appearance_memory is not None and APPMEM_ENABLE:
+                        try:
+                            proto_seq = appearance_memory.get_prototypes(tid, frame_idx)
+                        except Exception:
+                            proto_seq = []
+                    else:
+                        proto_seq = s.get("emb_proto_queue", []) or []
+
                     tw = {
                         'centers': centers_hist[-LSTM_HISTORY_LEN:],
                         'boxes': boxes_hist,
@@ -1227,6 +1257,7 @@ def appearance_associate(
                         'hist': s.get('hist', None),
                         'reid_seq': reid_seq,
                         'hist_seq': hist_seq,
+                        'proto_seq': proto_seq,
                     }
 
                     pred = traj_predictor.predict(tw)  # type: ignore[operator]
@@ -1276,7 +1307,15 @@ def appearance_associate(
         pb = _bbox_from_center_wh(pcx, pcy, w, h)
         pred_boxes.append(pb)
         pred_centers.append((pcx, pcy))
-        track_embs.append(s.get("emb_mem", s.get("emb_surfer", s.get("emb"))))
+        mem_vec = s.get("emb_mem", s.get("emb_surfer", s.get("emb")))
+        if appearance_memory is not None and APPMEM_ENABLE:
+            try:
+                mem_now = appearance_memory.get(tid, frame_idx)
+                if mem_now is not None:
+                    mem_vec = mem_now
+            except Exception:
+                pass
+        track_embs.append(mem_vec)
         track_hists.append(s.get("hist_surfer", s.get("hist")))
 
     # Warp predictions by camera motion if provided
@@ -1775,6 +1814,44 @@ def appearance_associate(
             "hist_bank": hist_bank,
 
         }
+        if appearance_memory is not None and APPMEM_ENABLE:
+            mem_vec = None
+            proto_queue: List[np.ndarray] = []
+            if det_emb_cur is not None and can_update_emb and APPEAR_EMB_ENABLE:
+                qinfo_mem = dict(quality_info or {})
+                qinfo_mem.setdefault("frame_idx", frame_idx)
+                qinfo_mem.setdefault("timestamp", frame_idx)
+                qinfo_mem.setdefault("conf", float(conf_here))
+                qinfo_mem.setdefault("vis", float(new_state[tid].get("vis", 1.0)))
+                if "min_side" not in qinfo_mem:
+                    try:
+                        min_side_obs = float(min(_bbox_wh(db)))
+                    except Exception:
+                        min_side_obs = float(APPMEM_MIN_SIDE)
+                    qinfo_mem["min_side"] = min_side_obs
+                if "blur" not in qinfo_mem:
+                    qinfo_mem["blur"] = float((quality_info or {}).get("blur", 0.0))
+                try:
+                    mem_vec = appearance_memory.update(tid, det_emb_cur, qinfo_mem)
+                except Exception:
+                    mem_vec = None
+            else:
+                try:
+                    mem_vec = appearance_memory.get(tid, frame_idx)
+                except Exception:
+                    mem_vec = None
+            try:
+                proto_queue = appearance_memory.get_prototypes(tid, frame_idx)
+            except Exception:
+                proto_queue = []
+            if mem_vec is not None:
+                new_state[tid]["emb_mem"] = mem_vec
+            elif "emb_mem" in s:
+                new_state[tid]["emb_mem"] = s.get("emb_mem")
+            if proto_queue:
+                new_state[tid]["emb_proto_queue"] = proto_queue
+            elif "emb_proto_queue" in s:
+                new_state[tid]["emb_proto_queue"] = s.get("emb_proto_queue")
         if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE and quality_ok:
             try:
                 meta_bank = {
@@ -1852,6 +1929,11 @@ def appearance_associate(
                             GLOBAL_REID_BANK.add(int(tid), vb, frame_idx, meta=meta_bank)
                 except Exception:
                     pass
+            if appearance_memory is not None and APPMEM_ENABLE:
+                try:
+                    appearance_memory.remove(tid)
+                except Exception:
+                    pass
             dropped_pairs.append((int(tid), int(s.get("age", 0))))
             continue
         # keep in state as missing
@@ -1860,6 +1942,19 @@ def appearance_associate(
             "time_since_update": miss,
             "age": int(s.get("age", 0)) + 1,
         }
+        if appearance_memory is not None and APPMEM_ENABLE:
+            try:
+                mem_vec = appearance_memory.get(tid, frame_idx)
+                if mem_vec is not None:
+                    new_state[int(tid)]["emb_mem"] = mem_vec
+            except Exception:
+                pass
+            try:
+                proto_queue = appearance_memory.get_prototypes(tid, frame_idx)
+                if proto_queue:
+                    new_state[int(tid)]["emb_proto_queue"] = proto_queue
+            except Exception:
+                pass
 
     # Unmatched detections: try to reclaim a recent lost ID (AA stitch), else create new
     used_reclaims = set()
@@ -1993,6 +2088,32 @@ def appearance_associate(
                         hist_for_bank = cand_state.get("hist")
                         if hist_for_bank is not None:
                             cand_state["hist_bank"] = [hist_for_bank]
+                        if appearance_memory is not None and APPMEM_ENABLE and det_emb is not None:
+                            qinfo_mem = dict(quality_info or {})
+                            qinfo_mem.setdefault("frame_idx", frame_idx)
+                            qinfo_mem.setdefault("timestamp", frame_idx)
+                            qinfo_mem.setdefault("conf", float(qinfo_mem.get("conf", 1.0)))
+                            qinfo_mem.setdefault("vis", float(qinfo_mem.get("vis", 1.0)))
+                            if "min_side" not in qinfo_mem:
+                                try:
+                                    w_r, h_r = _bbox_wh(db)
+                                    qinfo_mem["min_side"] = float(min(w_r, h_r))
+                                except Exception:
+                                    qinfo_mem["min_side"] = float(APPMEM_MIN_SIDE)
+                            if "blur" not in qinfo_mem:
+                                qinfo_mem["blur"] = float((quality_info or {}).get("blur", 0.0))
+                            try:
+                                mem_vec = appearance_memory.update(int(cand_tid), det_emb, qinfo_mem)
+                            except Exception:
+                                mem_vec = None
+                            try:
+                                proto_queue = appearance_memory.get_prototypes(int(cand_tid), frame_idx)
+                            except Exception:
+                                proto_queue = []
+                            if mem_vec is not None:
+                                cand_state["emb_mem"] = mem_vec
+                            if proto_queue:
+                                cand_state["emb_proto_queue"] = proto_queue
                         new_state[int(cand_tid)] = cand_state
                         assigned_ids[di] = int(cand_tid)
                         used_reclaims.add(int(cand_tid))
@@ -2068,6 +2189,32 @@ def appearance_associate(
                         "emb_bank": [det_emb_cur] if isinstance(det_emb_cur, np.ndarray) else [],
                         "hist": det_hists[di] if di < len(det_hists) else None,
                     }
+                    if appearance_memory is not None and APPMEM_ENABLE and det_emb_cur is not None:
+                        qinfo_mem = dict(quality_info or {})
+                        qinfo_mem.setdefault("frame_idx", frame_idx)
+                        qinfo_mem.setdefault("timestamp", frame_idx)
+                        qinfo_mem.setdefault("conf", float(qinfo_mem.get("conf", 1.0)))
+                        qinfo_mem.setdefault("vis", float(qinfo_mem.get("vis", 1.0)))
+                        if "min_side" not in qinfo_mem:
+                            try:
+                                w_r, h_r = _bbox_wh(db)
+                                qinfo_mem["min_side"] = float(min(w_r, h_r))
+                            except Exception:
+                                qinfo_mem["min_side"] = float(APPMEM_MIN_SIDE)
+                        if "blur" not in qinfo_mem:
+                            qinfo_mem["blur"] = float((quality_info or {}).get("blur", 0.0))
+                        try:
+                            mem_vec = appearance_memory.update(best_tid, det_emb_cur, qinfo_mem)
+                        except Exception:
+                            mem_vec = None
+                        try:
+                            proto_queue = appearance_memory.get_prototypes(best_tid, frame_idx)
+                        except Exception:
+                            proto_queue = []
+                        if mem_vec is not None:
+                            new_state[best_tid]["emb_mem"] = mem_vec
+                        if proto_queue:
+                            new_state[best_tid]["emb_proto_queue"] = proto_queue
                     assigned_ids[di] = best_tid
                     # remove revived entry from archive
                     try:
@@ -2101,6 +2248,32 @@ def appearance_associate(
             "emb_bank": ([emb_spawn] if isinstance(emb_spawn, np.ndarray) else []),
             "hist": hist_spawn,
         }
+        if appearance_memory is not None and APPMEM_ENABLE and emb_spawn is not None:
+            qinfo_mem = dict(quality_info or {})
+            qinfo_mem.setdefault("frame_idx", frame_idx)
+            qinfo_mem.setdefault("timestamp", frame_idx)
+            qinfo_mem.setdefault("conf", float(qinfo_mem.get("conf", 1.0)))
+            qinfo_mem.setdefault("vis", float(qinfo_mem.get("vis", 1.0)))
+            if "min_side" not in qinfo_mem:
+                try:
+                    w_r, h_r = _bbox_wh(db)
+                    qinfo_mem["min_side"] = float(min(w_r, h_r))
+                except Exception:
+                    qinfo_mem["min_side"] = float(APPMEM_MIN_SIDE)
+            if "blur" not in qinfo_mem:
+                qinfo_mem["blur"] = float((quality_info or {}).get("blur", 0.0))
+            try:
+                mem_vec = appearance_memory.update(spawn_tid, emb_spawn, qinfo_mem)
+            except Exception:
+                mem_vec = None
+            try:
+                proto_queue = appearance_memory.get_prototypes(spawn_tid, frame_idx)
+            except Exception:
+                proto_queue = []
+            if mem_vec is not None:
+                new_state[spawn_tid]["emb_mem"] = mem_vec
+            if proto_queue:
+                new_state[spawn_tid]["emb_proto_queue"] = proto_queue
         if GLOBAL_REID_BANK is not None and APPEAR_EMB_ENABLE and quality_ok:
             try:
                 meta_bank = {
