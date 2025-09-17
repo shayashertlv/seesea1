@@ -1,6 +1,7 @@
 import importlib
+import json
 import os
-from typing import Any, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -37,23 +38,56 @@ def _get_mask2former_predictor() -> Optional[Any]:
     return _mask2former_predictor
 
 
+def _load_factory(factory_path: str) -> Optional[Any]:
+    global _mask2former_failure_reason
+    try:
+        module_name, attr = factory_path.rsplit(":", 1)
+    except ValueError as exc:
+        _mask2former_failure_reason = f"invalid factory '{factory_path}': {exc}"
+        logger.error("Mask2Former factory path '%s' is invalid", factory_path)
+        return None
+    try:
+        factory_module = importlib.import_module(module_name)
+    except Exception as exc:
+        _mask2former_failure_reason = f"import '{module_name}' failed: {exc}"
+        logger.exception("Mask2Former factory module '%s' import failed", module_name)
+        return None
+    factory = getattr(factory_module, attr, None)
+    if factory is None:
+        _mask2former_failure_reason = f"factory '{factory_path}' not found"
+        logger.error("Mask2Former factory attribute '%s' missing in module '%s'", attr, module_name)
+        return None
+    kwargs: Dict[str, Any] = {}
+    args_env = os.getenv("SEG_MASK2FORMER_ARGS")
+    if args_env:
+        try:
+            parsed = json.loads(args_env)
+            if not isinstance(parsed, dict):
+                raise TypeError("SEG_MASK2FORMER_ARGS must decode to a JSON object")
+            kwargs.update(parsed)
+        except Exception as exc:
+            logger.warning("Mask2Former factory args parsing failed: %s", exc)
+    try:
+        predictor = factory(**kwargs) if callable(factory) else factory
+    except Exception as exc:
+        _mask2former_failure_reason = f"factory '{factory_path}' raised {exc.__class__.__name__}: {exc}"
+        logger.exception("Mask2Former factory '%s' raised an exception", factory_path)
+        return None
+    if predictor is not None:
+        logger.debug("Mask2Former predictor created via factory '%s'", factory_path)
+        _mask2former_failure_reason = None
+    else:
+        _mask2former_failure_reason = f"factory '{factory_path}' returned None"
+    return predictor
+
+
 def _build_mask2former_predictor() -> Optional[Any]:
     global _mask2former_failure_reason
     factory_path = os.getenv("SEG_MASK2FORMER_FACTORY")
     if factory_path:
-        try:
-            module_name, attr = factory_path.rsplit(":", 1)
-            factory_module = importlib.import_module(module_name)
-            factory = getattr(factory_module, attr)
-            predictor = factory() if callable(factory) else factory
-            if predictor is not None:
-                logger.debug("Mask2Former predictor created via factory '%s'", factory_path)
-                _mask2former_failure_reason = None
-                return predictor
-        except Exception as exc:
-            logger.exception("Mask2Former factory '%s' raised an exception", factory_path)
-            _mask2former_failure_reason = f"factory '{factory_path}' failed with {exc.__class__.__name__}: {exc}"
-            return None
+        predictor = _load_factory(factory_path)
+        if predictor is not None:
+            return predictor
     module_names = ["detectron2"]
     module_names.extend([
         "detectron2.projects.mask2former",  # common extension location

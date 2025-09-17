@@ -1,6 +1,7 @@
 import importlib
+import json
 import os
-from typing import Any, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -37,8 +38,56 @@ def _get_sam_predictor() -> Optional[Any]:
     return _sam_predictor
 
 
+def _load_factory(factory_path: str) -> Optional[Any]:
+    global _sam_predictor_failure_reason
+    try:
+        module_name, attr = factory_path.rsplit(":", 1)
+    except ValueError as exc:
+        _sam_predictor_failure_reason = f"invalid factory '{factory_path}': {exc}"
+        logger.error("SAM2 factory path '%s' is invalid", factory_path)
+        return None
+    try:
+        factory_module = importlib.import_module(module_name)
+    except Exception as exc:
+        _sam_predictor_failure_reason = f"import '{module_name}' failed: {exc}"
+        logger.exception("SAM2 factory module '%s' import failed", module_name)
+        return None
+    factory = getattr(factory_module, attr, None)
+    if factory is None:
+        _sam_predictor_failure_reason = f"factory '{factory_path}' not found"
+        logger.error("SAM2 factory attribute '%s' not present in module '%s'", attr, module_name)
+        return None
+    kwargs: Dict[str, Any] = {}
+    args_env = os.getenv("SEG_SAM2_ARGS")
+    if args_env:
+        try:
+            parsed = json.loads(args_env)
+            if not isinstance(parsed, dict):
+                raise TypeError("SEG_SAM2_ARGS must decode to a JSON object")
+            kwargs.update(parsed)
+        except Exception as exc:
+            logger.warning("SAM2 factory args parsing failed: %s", exc)
+    try:
+        predictor = factory(**kwargs) if callable(factory) else factory
+    except Exception as exc:
+        _sam_predictor_failure_reason = f"factory '{factory_path}' raised {exc.__class__.__name__}: {exc}"
+        logger.exception("SAM2 factory '%s' raised an exception", factory_path)
+        return None
+    if predictor is not None:
+        logger.debug("SAM2 predictor created via factory '%s'", factory_path)
+        _sam_predictor_failure_reason = None
+    else:
+        _sam_predictor_failure_reason = f"factory '{factory_path}' returned None"
+    return predictor
+
+
 def _build_sam_predictor() -> Optional[Any]:
     global _sam_predictor_failure_reason
+    factory_path = os.getenv("SEG_SAM2_FACTORY")
+    if factory_path:
+        predictor = _load_factory(factory_path)
+        if predictor is not None:
+            return predictor
     module_names = ("sam2", "segment_anything")
     last_error: Optional[str] = None
     for name in module_names:
