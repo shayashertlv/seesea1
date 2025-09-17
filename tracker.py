@@ -170,6 +170,98 @@ except Exception:
     Image = None
     HAS_PIL = False
 
+# Cache the expected input type for the active ReID transform so we can
+# gracefully retry tensor-based fallbacks when torchvision presets reject PIL
+# images (or vice versa). The mode is probed lazily after a transform is
+# loaded and reset whenever a new transform is assigned.
+_REID_TF_MODE: str = "unknown"
+_REID_TF_PIL_ERROR: Optional[str] = None
+_REID_TF_TENSOR_ERROR: Optional[str] = None
+
+
+def _reset_reid_transform_mode() -> None:
+    global _REID_TF_MODE, _REID_TF_PIL_ERROR, _REID_TF_TENSOR_ERROR
+    _REID_TF_MODE = "unknown"
+    _REID_TF_PIL_ERROR = None
+    _REID_TF_TENSOR_ERROR = None
+
+
+def _probe_reid_transform_mode(transform: Any) -> str:
+    """Detect whether the transform expects PIL images, tensors, or either."""
+    global _REID_TF_MODE, _REID_TF_PIL_ERROR, _REID_TF_TENSOR_ERROR
+    if transform is None:
+        _REID_TF_MODE = "either"
+        return _REID_TF_MODE
+
+    modes = set()
+
+    if HAS_PIL and Image is not None:
+        try:
+            dummy = Image.new("RGB", (8, 8))
+            transform(dummy)
+            modes.add("pil")
+        except Exception as exc:  # pragma: no cover - diagnostic path
+            _REID_TF_PIL_ERROR = str(exc)
+            logger.debug("[emb] transform rejected PIL input: %s", exc)
+
+    if HAS_TORCH and torch is not None:
+        try:
+            dummy_t = torch.zeros((3, 8, 8), dtype=torch.float32)
+            transform(dummy_t)
+            modes.add("tensor")
+        except Exception as exc:  # pragma: no cover - diagnostic path
+            _REID_TF_TENSOR_ERROR = str(exc)
+            logger.debug("[emb] transform rejected tensor input: %s", exc)
+
+    if not modes:
+        _REID_TF_MODE = "either"
+    elif modes == {"pil"}:
+        _REID_TF_MODE = "pil"
+    elif modes == {"tensor"}:
+        _REID_TF_MODE = "tensor"
+    else:
+        _REID_TF_MODE = "either"
+    return _REID_TF_MODE
+
+
+def _prepare_reid_tensor(rgb: np.ndarray) -> "torch.Tensor":
+    """Apply the active ReID transform, retrying with tensors when needed."""
+    if not HAS_TORCH or torch is None:
+        raise RuntimeError("torch is required for ReID embeddings")
+
+    if _REID_TF is None:
+        return _to_tensor_rgb(rgb, _REID_INPUT_SIZE)
+
+    mode = _REID_TF_MODE if _REID_TF_MODE != "unknown" else _probe_reid_transform_mode(_REID_TF)
+    pil_exc: Optional[Exception] = None
+    tensor_exc: Optional[Exception] = None
+
+    if mode in ("pil", "either") and HAS_PIL and Image is not None:
+        try:
+            pil = Image.fromarray(rgb)
+            ten = _REID_TF(pil)
+            if isinstance(ten, torch.Tensor):
+                return ten
+        except Exception as exc:  # pragma: no cover - diagnostic path
+            pil_exc = exc
+
+    if mode in ("tensor", "either") and HAS_TORCH and torch is not None:
+        try:
+            tens = torch.from_numpy(rgb).permute(2, 0, 1)
+            if tens.dtype != torch.float32:
+                tens = tens.float().div(255.0)
+            ten = _REID_TF(tens)
+            if isinstance(ten, torch.Tensor):
+                return ten
+        except Exception as exc:  # pragma: no cover - diagnostic path
+            tensor_exc = exc
+
+    if pil_exc is not None:
+        logger.debug("[emb] PIL transform failed: %s", pil_exc)
+    if tensor_exc is not None:
+        logger.debug("[emb] tensor transform failed: %s", tensor_exc)
+    return _to_tensor_rgb(rgb, _REID_INPUT_SIZE)
+
 # Class filtering: comma-separated indices, e.g. "0" or "0,1"
 _TRACK_CLASSES_STR = os.getenv("TRACK_CLASSES", "").strip()
 TRACK_CLASSES = None
@@ -2337,9 +2429,10 @@ def _call_slicer_with_timeout(slicer: Any, frame: np.ndarray, timeout_s: float) 
 # -----------------------------
 _REID_MODEL = None
 _REID_TF = None
-_REID_TF_EXPECTS: str = "either"
 _REID_DEV = None
 _REID_INPUT_SIZE = (256, 128)  # H, W typical for person/osnet; surfers are vertical-ish
+
+_reset_reid_transform_mode()
 
 
 def _select_device_from_env() -> str:
@@ -2364,37 +2457,8 @@ def _select_device_from_env() -> str:
     return "cpu"
 
 
-def _probe_reid_transform(tf: Any) -> str:
-    """Return which input types the transform accepts ("pil", "tensor", "either", "manual")."""
-    if tf is None:
-        return "manual"
-    modes = set()
-    dummy = np.zeros((32, 16, 3), dtype=np.uint8)
-    if HAS_PIL and Image is not None:
-        try:
-            pil = Image.fromarray(dummy)
-            out = tf(pil)
-            if torch is not None and torch.is_tensor(out):
-                modes.add("pil")
-        except Exception:
-            pass
-    if torch is not None:
-        try:
-            tens = torch.from_numpy(dummy).permute(2, 0, 1).float().div(255.0)
-            out = tf(tens)
-            if torch.is_tensor(out):
-                modes.add("tensor")
-        except Exception:
-            pass
-    if not modes:
-        return "manual"
-    if len(modes) == 2:
-        return "either"
-    return next(iter(modes))
-
-
 def _init_reid():
-    global _REID_MODEL, _REID_TF, _REID_DEV, _REID_PLUG, _REID_TF_EXPECTS
+    global _REID_MODEL, _REID_TF, _REID_DEV, _REID_PLUG
     if not (HAS_TORCH and APPEAR_EMB_ENABLE):
         return False
     if _REID_MODEL is not None or ('_REID_PLUG' in globals() and _REID_PLUG is not None):
@@ -2405,15 +2469,10 @@ def _init_reid():
             try:
                 _REID_PLUG = _PluggableReID(backend=REID_BACKBONE, device=REID_DEVICE, fp16=REID_FP16)
                 return True
-            except Exception as exc:  # pragma: no cover - logging path
-                logger.warning(
-                    "[sv-pipeline] ReID backend '%s' failed to load (%s); falling back to builtin weights",
-                    getattr(_PluggableReID, "__name__", str(_PluggableReID)), exc,
-                    exc_info=True,
-                )
-                _REID_PLUG = None
+            except Exception as e:
+                logger.warning("[sv-pipeline] warning: ReID backend failed to load, falling back to OSNet")
     except Exception:
-        logger.debug("[sv-pipeline] unexpected error while probing pluggable ReID backend", exc_info=True)
+        pass
     try:
         dev_str = _select_device_from_env()
         dev = torch.device(dev_str)
@@ -2470,19 +2529,20 @@ def _init_reid():
         model.to(dev)
         _REID_MODEL = model
         _REID_TF = tf
-        _REID_TF_EXPECTS = _probe_reid_transform(tf)
         _REID_DEV = dev
+        _reset_reid_transform_mode()
         return True
     except Exception:
         _REID_MODEL = None
         _REID_TF = None
         _REID_DEV = None
+        _reset_reid_transform_mode()
         return False
 
 
 def _init_reid_builtin_only():
     """Initialize only the builtin ReID model (OSNet/ResNet), bypassing any pluggable backends."""
-    global _REID_MODEL, _REID_TF, _REID_DEV, _REID_TF_EXPECTS
+    global _REID_MODEL, _REID_TF, _REID_DEV
     if not HAS_TORCH:
         return False
     try:
@@ -2541,13 +2601,14 @@ def _init_reid_builtin_only():
         model.to(dev)
         _REID_MODEL = model
         _REID_TF = tf
-        _REID_TF_EXPECTS = _probe_reid_transform(tf)
         _REID_DEV = dev
+        _reset_reid_transform_mode()
         return True
     except Exception:
         _REID_MODEL = None
         _REID_TF = None
         _REID_DEV = None
+        _reset_reid_transform_mode()
         return False
 
 
@@ -3012,32 +3073,9 @@ def _compute_embeddings_for_dets(frame: np.ndarray,
             }
             qualities.append(qual)
             rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-            # Use PIL transforms when possible
-            ten = None
-            pil_exc: Optional[Exception] = None
-            tensor_exc: Optional[Exception] = None
-            tf_mode = globals().get("_REID_TF_EXPECTS", "either")
-            if HAS_PIL and Image is not None and tf_mode in ("pil", "either"):
-                try:
-                    pil = Image.fromarray(rgb)
-                    ten = _REID_TF(pil)  # Resize->ToTensor->Normalize if OSNet path
-                except Exception as exc:
-                    pil_exc = exc
-                    ten = None
-            if ten is None and tf_mode in ("tensor", "either"):
-                try:
-                    tens = torch.from_numpy(rgb).permute(2, 0, 1)
-                    if tens.dtype != torch.float32:
-                        tens = tens.float().div(255.0)
-                    ten = _REID_TF(tens)
-                except Exception as exc:
-                    tensor_exc = exc
-                    ten = None
-            if ten is None:
-                if pil_exc is not None:
-                    logger.debug("[emb] PIL transform failed: %s", pil_exc)
-                if tensor_exc is not None and tf_mode in ("tensor", "either"):
-                    logger.debug("[emb] tensor transform failed: %s", tensor_exc)
+            try:
+                ten = _prepare_reid_tensor(rgb)
+            except Exception:
                 ten = _to_tensor_rgb(rgb, _REID_INPUT_SIZE)
             imgs.append(ten)
             valids.append(True)
