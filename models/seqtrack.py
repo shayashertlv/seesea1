@@ -12,6 +12,7 @@ except Exception:
     nn = None
     HAS_TORCH = False
 
+LSTM_APPEAR_ENABLE = int(os.getenv("LSTM_APPEAR_ENABLE", "0")) == 1
 LSTM_APPEAR_HIDDEN = int(os.getenv("LSTM_APPEAR_HIDDEN", "128"))
 
 if HAS_TORCH:
@@ -123,7 +124,8 @@ if HAS_TORCH:
             Lazy-creates a 1-layer GRU and a linear projection to keep footprint tiny.
             Returns a torch.Tensor of shape (1, H) on self.device, or None if not available.
             """
-            if not LSTM_APPEAR_ENABLE:
+            enabled = getattr(self, "LSTM_APPEAR_ENABLE", globals().get("LSTM_APPEAR_ENABLE", False))
+            if not enabled:
                 return None
             try:
                 T = max(len(reid_seq or []), len(hist_seq or []))
