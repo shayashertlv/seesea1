@@ -149,12 +149,18 @@ class GlobalReIDBank:
             scores, indices = self._index.search(vec.reshape(1, -1), k)  # type: ignore[attr-defined]
             sims = scores[0]
             idxs = indices[0]
-        elif self._backend in {"sklearn", "scipy"} and self._index is not None:
+        elif self._backend == "sklearn" and self._index is not None:
             dists, indices = self._index.query(vec.reshape(1, -1), k=k, return_distance=True)  # type: ignore[attr-defined]
-            d = dists[0]
+            d = np.atleast_2d(dists)[0]
             # embeddings are L2-normalised -> cosine = 1 - 0.5 * ||u - v||^2
             sims = 1.0 - 0.5 * np.square(d)
-            idxs = indices[0]
+            idxs = np.atleast_2d(indices)[0]
+        elif self._backend == "scipy" and self._index is not None:
+            dists, indices = self._index.query(vec.reshape(1, -1), k=k)  # type: ignore[attr-defined]
+            d = np.atleast_2d(dists)[0]
+            # embeddings are L2-normalised -> cosine = 1 - 0.5 * ||u - v||^2
+            sims = 1.0 - 0.5 * np.square(d)
+            idxs = np.atleast_2d(indices)[0]
         else:
             if self._matrix is None:
                 self._matrix = np.stack([rec.embedding for rec in self._records])
