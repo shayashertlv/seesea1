@@ -1,6 +1,6 @@
 import importlib
 import os
-from typing import Any, List, Tuple, Optional
+from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -14,6 +14,20 @@ logger = logging.getLogger(__name__)
 _logged = False
 _sam_predictor: Optional[Any] = None
 _sam_predictor_failed = False
+_diag_failures: List[str] = []
+
+
+def _record_failure(reason: str, exc: Optional[BaseException] = None) -> None:
+    """Store and log diagnostic information about predictor failures."""
+    try:
+        detail = reason
+        if exc is not None:
+            detail = f"{reason}: {exc}"
+        _diag_failures.append(detail)
+        logger.debug("[seg][sam2] %s", detail)
+    except Exception:
+        # Diagnostics must never break inference; ignore logging failures.
+        pass
 
 
 def _get_sam_predictor() -> Optional[Any]:
@@ -35,14 +49,17 @@ def _build_sam_predictor() -> Optional[Any]:
     for name in module_names:
         try:
             module = importlib.import_module(name)
-        except Exception:
+        except Exception as exc:
+            _record_failure(f"import failed for {name}", exc)
             continue
         try:
             predictor = _instantiate_predictor(module)
-        except Exception:
+        except Exception as exc:
+            _record_failure(f"predictor builder raised for {name}", exc)
             return None
         if predictor is not None:
             return predictor
+        _record_failure(f"no predictor factory matched for {name}")
     return None
 
 
@@ -69,9 +86,11 @@ def _instantiate_predictor(module: Any) -> Optional[Any]:
             for call_kwargs in call_kwargs_seq:
                 try:
                     predictor = builder(**call_kwargs)
-                except TypeError:
+                except TypeError as exc:
+                    _record_failure(f"builder {attr} rejected kwargs {call_kwargs}", exc)
                     continue
-                except Exception:
+                except Exception as exc:
+                    _record_failure(f"builder {attr} failed", exc)
                     raise
                 if predictor is not None:
                     return predictor
@@ -89,9 +108,11 @@ def _instantiate_predictor(module: Any) -> Optional[Any]:
         for call_kwargs in call_kwargs_seq:
             try:
                 predictor = cls(**call_kwargs)
-            except TypeError:
+            except TypeError as exc:
+                _record_failure(f"class {attr} rejected kwargs {call_kwargs}", exc)
                 continue
-            except Exception:
+            except Exception as exc:
+                _record_failure(f"class {attr} failed", exc)
                 raise
             if predictor is not None:
                 return predictor
@@ -297,15 +318,21 @@ def infer_roi_masks(frame_bgr: np.ndarray,
                 parsed = _assign_prediction(raw_output, frame_bgr, det_xyxy)
                 if parsed is not None:
                     return parsed
-            except Exception:
+            except Exception as exc:
+                _record_failure("predictor execution failed", exc)
                 _sam_predictor_failed = True
                 _sam_predictor = None
-    except Exception:
+    except Exception as exc:
+        _record_failure("predictor acquisition failed", exc)
         _sam_predictor_failed = True
         _sam_predictor = None
     if not _logged:
         try:
-            logger.warning('[seg] SAM2 not available; using GrabCut ROI fallback')
+            if _diag_failures:
+                detail = "; ".join(_diag_failures[-4:])
+                logger.warning('[seg] SAM2 not available; using GrabCut ROI fallback (%s)', detail)
+            else:
+                logger.warning('[seg] SAM2 not available; using GrabCut ROI fallback')
         except Exception:
             pass
         _logged = True
