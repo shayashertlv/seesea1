@@ -2337,6 +2337,7 @@ def _call_slicer_with_timeout(slicer: Any, frame: np.ndarray, timeout_s: float) 
 # -----------------------------
 _REID_MODEL = None
 _REID_TF = None
+_REID_TF_EXPECTS: str = "either"
 _REID_DEV = None
 _REID_INPUT_SIZE = (256, 128)  # H, W typical for person/osnet; surfers are vertical-ish
 
@@ -2363,8 +2364,37 @@ def _select_device_from_env() -> str:
     return "cpu"
 
 
+def _probe_reid_transform(tf: Any) -> str:
+    """Return which input types the transform accepts ("pil", "tensor", "either", "manual")."""
+    if tf is None:
+        return "manual"
+    modes = set()
+    dummy = np.zeros((32, 16, 3), dtype=np.uint8)
+    if HAS_PIL and Image is not None:
+        try:
+            pil = Image.fromarray(dummy)
+            out = tf(pil)
+            if torch is not None and torch.is_tensor(out):
+                modes.add("pil")
+        except Exception:
+            pass
+    if torch is not None:
+        try:
+            tens = torch.from_numpy(dummy).permute(2, 0, 1).float().div(255.0)
+            out = tf(tens)
+            if torch.is_tensor(out):
+                modes.add("tensor")
+        except Exception:
+            pass
+    if not modes:
+        return "manual"
+    if len(modes) == 2:
+        return "either"
+    return next(iter(modes))
+
+
 def _init_reid():
-    global _REID_MODEL, _REID_TF, _REID_DEV, _REID_PLUG
+    global _REID_MODEL, _REID_TF, _REID_DEV, _REID_PLUG, _REID_TF_EXPECTS
     if not (HAS_TORCH and APPEAR_EMB_ENABLE):
         return False
     if _REID_MODEL is not None or ('_REID_PLUG' in globals() and _REID_PLUG is not None):
@@ -2435,6 +2465,7 @@ def _init_reid():
         model.to(dev)
         _REID_MODEL = model
         _REID_TF = tf
+        _REID_TF_EXPECTS = _probe_reid_transform(tf)
         _REID_DEV = dev
         return True
     except Exception:
@@ -2446,7 +2477,7 @@ def _init_reid():
 
 def _init_reid_builtin_only():
     """Initialize only the builtin ReID model (OSNet/ResNet), bypassing any pluggable backends."""
-    global _REID_MODEL, _REID_TF, _REID_DEV
+    global _REID_MODEL, _REID_TF, _REID_DEV, _REID_TF_EXPECTS
     if not HAS_TORCH:
         return False
     try:
@@ -2505,6 +2536,7 @@ def _init_reid_builtin_only():
         model.to(dev)
         _REID_MODEL = model
         _REID_TF = tf
+        _REID_TF_EXPECTS = _probe_reid_transform(tf)
         _REID_DEV = dev
         return True
     except Exception:
@@ -2976,13 +3008,31 @@ def _compute_embeddings_for_dets(frame: np.ndarray,
             qualities.append(qual)
             rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
             # Use PIL transforms when possible
-            try:
-                if HAS_PIL and Image is not None:
+            ten = None
+            pil_exc: Optional[Exception] = None
+            tensor_exc: Optional[Exception] = None
+            tf_mode = globals().get("_REID_TF_EXPECTS", "either")
+            if HAS_PIL and Image is not None and tf_mode in ("pil", "either"):
+                try:
                     pil = Image.fromarray(rgb)
                     ten = _REID_TF(pil)  # Resize->ToTensor->Normalize if OSNet path
-                else:
-                    raise RuntimeError("force numpy path")
-            except Exception:
+                except Exception as exc:
+                    pil_exc = exc
+                    ten = None
+            if ten is None and tf_mode in ("tensor", "either"):
+                try:
+                    tens = torch.from_numpy(rgb).permute(2, 0, 1)
+                    if tens.dtype != torch.float32:
+                        tens = tens.float().div(255.0)
+                    ten = _REID_TF(tens)
+                except Exception as exc:
+                    tensor_exc = exc
+                    ten = None
+            if ten is None:
+                if pil_exc is not None:
+                    logger.debug("[emb] PIL transform failed: %s", pil_exc)
+                if tensor_exc is not None and tf_mode in ("tensor", "either"):
+                    logger.debug("[emb] tensor transform failed: %s", tensor_exc)
                 ten = _to_tensor_rgb(rgb, _REID_INPUT_SIZE)
             imgs.append(ten)
             valids.append(True)

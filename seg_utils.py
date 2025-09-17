@@ -35,8 +35,12 @@ def _grabcut_roi(frame_bgr: np.ndarray,
             int(0.88 * roi.shape[1]),
             int(0.88 * roi.shape[0]),
         )
+        # OpenCV's grabCut requires preallocated background/foreground models.
+        # They are mutated in-place, so reinitialise them for every ROI.
+        bgd_model = np.zeros((1, 65), np.float64)
+        fgd_model = np.zeros((1, 65), np.float64)
         try:
-            cv2.grabCut(roi, m, rect, None, None, 2, cv2.GC_INIT_WITH_RECT)
+            cv2.grabCut(roi, m, rect, bgd_model, fgd_model, 2, cv2.GC_INIT_WITH_RECT)
             mask = np.where((m == cv2.GC_FGD) | (m == cv2.GC_PR_FGD), 1, 0).astype(np.uint8)
         except Exception:
             mask = np.ones((roi.shape[0], roi.shape[1]), dtype=np.uint8)
