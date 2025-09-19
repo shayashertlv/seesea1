@@ -35,6 +35,15 @@ try:
 except Exception:
     _PluggableReID = None  # type: ignore
 
+try:
+    from transformer.models.association import TransformerAssociation  # type: ignore
+except Exception:
+    TransformerAssociation = None  # type: ignore
+
+try:
+    from transformer.data_collection.logger import get_association_logger  # type: ignore
+except Exception:
+    get_association_logger = None  # type: ignore
 # Pluggable ReID instance placeholder (explicit global)
 _REID_PLUG = None  # pluggable ReID instance if available
 
@@ -110,6 +119,30 @@ WEIGHTS_PATH = _cfg.weights_path
 CAPTURES_DIR = _cfg.captures_dir
 TRACK_CONF = _cfg.track_conf
 TRACK_IOU = _cfg.track_iou
+
+TRANSFORMER_ASSOC_ENABLE = int(os.getenv("TRANSFORMER_ASSOC_ENABLE", "0")) == 1
+_TRANSFORMER_ASSOC = None
+_ASSOC_LOGGER = get_association_logger() if get_association_logger is not None else None
+
+
+def _get_transformer_assoc():
+    global _TRANSFORMER_ASSOC
+    if not TRANSFORMER_ASSOC_ENABLE:
+        return None
+    if TransformerAssociation is None:
+        return None
+    if _TRANSFORMER_ASSOC is None:
+        try:
+            _TRANSFORMER_ASSOC = TransformerAssociation.from_env()
+        except Exception:
+            _TRANSFORMER_ASSOC = None
+    return _TRANSFORMER_ASSOC
+
+APPEAR_MEMORY_ENABLE = int(os.getenv("APPEAR_MEMORY_ENABLE", "1")) == 1
+if APPEAR_MEMORY_ENABLE and AppearanceMemory is not None:
+    _APPEAR_MEMORY = AppearanceMemory()
+else:
+    _APPEAR_MEMORY = None
 
 # Prefer Shay's local weights on Windows if env not set and file exists
 _default_weights_win = r"C:\Users\Shay\PycharmProjects\seesea\weights\surf_polish640_best.pt"
@@ -1117,6 +1150,7 @@ def appearance_associate(
     dropped_pairs: List[Tuple[int, int]] where each pair is (track_id, age).
     Drop policy: tracks removed if time_since_update > BT_BUFFER.
     """
+    global _APPEAR_MEMORY, _ASSOC_LOGGER
     num_dets = len(boxes)
     if num_dets == 0:
         # Increment time_since_update and drop expired
@@ -1191,7 +1225,6 @@ def appearance_associate(
                             s["emb_mem"] = pred["app_mem"]
                     except Exception:
                         pass
-
                     s["_lstm_cont"] = cont
                     if cov is not None:
                         s["_pred_cov"] = cov
@@ -1270,6 +1303,98 @@ def appearance_associate(
         track_vels.append(v)
         track_accs.append(float(np.hypot(v[0] - pv[0], v[1] - pv[1])))
 
+    track_pack = []
+    track_feature_rows: List[List[float]] = []
+    track_emb_logger: List[Optional[np.ndarray]] = []
+    for ti, (tid, s) in enumerate(tracks):
+        pb = pred_boxes_w[ti] if ti < len(pred_boxes_w) else pred_boxes[ti]
+        norm = (
+            float(pb[0]) / max(1.0, float(W)),
+            float(pb[1]) / max(1.0, float(H)),
+            float(pb[2]) / max(1.0, float(W)),
+            float(pb[3]) / max(1.0, float(H)),
+        )
+        vel = track_vels[ti] if ti < len(track_vels) else s.get("last_vel", (0.0, 0.0))
+        age = int(s.get("age", 0))
+        tsu = int(s.get("time_since_update", 0))
+        conf_hist = s.get("conf_hist", [])
+        if isinstance(conf_hist, (list, tuple)) and len(conf_hist) > 0:
+            conf_val = float(conf_hist[-1])
+        else:
+            conf_val = float(s.get("conf", s.get("conf_ema", 0.0) or 0.0))
+        vis_hist = s.get("vis_hist", [])
+        if isinstance(vis_hist, (list, tuple)) and len(vis_hist) > 0:
+            vis_val = float(vis_hist[-1])
+        else:
+            vis_raw = s.get("vis", s.get("last_vis", 1.0))
+            vis_val = float(vis_raw) if isinstance(vis_raw, (int, float)) else 1.0
+        mem_vec = None
+        if _APPEAR_MEMORY is not None:
+            try:
+                group = _APPEAR_MEMORY.get_group(tid)
+            except Exception:
+                group = None
+            if isinstance(group, np.ndarray) and group.size > 0:
+                mem_vec = group.mean(axis=0)
+        embed_src = mem_vec if isinstance(mem_vec, np.ndarray) else (track_embs[ti] if ti < len(track_embs) else None)
+        track_pack.append({
+            "tid": int(tid),
+            "pred_box": pb,
+            "last_bbox": s.get("last_bbox", pb),
+            "velocity": vel,
+            "age": age,
+            "time_since_update": tsu,
+            "confidence": conf_val,
+            "visibility": vis_val,
+            "embedding": embed_src,
+        })
+        track_feature_rows.append([
+            norm[0],
+            norm[1],
+            norm[2],
+            norm[3],
+            float(vel[0]) / max(1.0, float(W)),
+            float(vel[1]) / max(1.0, float(H)),
+            age / 100.0,
+            tsu / 50.0,
+            conf_val,
+            vis_val,
+        ])
+        track_emb_logger.append(embed_src)
+
+    det_pack = []
+    det_feature_rows: List[List[float]] = []
+    det_emb_logger: List[Optional[np.ndarray]] = []
+    for di, db in enumerate(boxes):
+        normd = (
+            float(db[0]) / max(1.0, float(W)),
+            float(db[1]) / max(1.0, float(H)),
+            float(db[2]) / max(1.0, float(W)),
+            float(db[3]) / max(1.0, float(H)),
+        )
+        conf_det = float(det_confs[di]) if det_confs is not None and di < len(det_confs) else 1.0
+        vis_det = float(det_vis[di]) if det_vis is not None and di < len(det_vis) else 1.0
+        emb_det = det_embs[di] if di < len(det_embs) else None
+        det_pack.append({
+            "box": db,
+            "confidence": conf_det,
+            "visibility": vis_det,
+            "embedding": emb_det,
+            "motion": (0.0, 0.0),
+            "hist": det_hists[di] if det_hists is not None and di < len(det_hists) else None,
+        })
+        det_feature_rows.append([
+            normd[0],
+            normd[1],
+            normd[2],
+            normd[3],
+            conf_det,
+            vis_det,
+            0.0,
+            0.0,
+        ])
+        det_emb_logger.append(emb_det)
+
     for ti, (_, s) in enumerate(tracks):
         for di, db in enumerate(boxes):
             iou = _iou_xyxy(pred_boxes_w[ti], db) if T > 0 else 0.0
@@ -1332,7 +1457,9 @@ def appearance_associate(
 
             # Compute appearance early so it can influence the gate
             _tid0 = tracks[ti][0] if ti < len(tracks) else None
-            t_emb = state.get(_tid0, {}).get("emb_ema") if (_tid0 is not None) else None
+            t_emb = track_pack[ti]["embedding"] if ti < len(track_pack) else None
+            if t_emb is None and _tid0 is not None:
+                t_emb = state.get(_tid0, {}).get("emb_ema")
             if t_emb is None:
                 t_emb = track_embs[ti]
             t_hist = state.get(_tid0, {}).get("hist_ema") if (_tid0 is not None) else None
@@ -1349,14 +1476,25 @@ def appearance_associate(
             if APPEAR_EMB_ENABLE:
                 det_vec = det_emb_surfer
                 if det_vec is not None:
+                    best_cs = -1.0
+                    if _APPEAR_MEMORY is not None and _tid0 is not None:
+                        try:
+                            proto_group = _APPEAR_MEMORY.get_group(_tid0)
+                        except Exception:
+                            proto_group = None
+                        if isinstance(proto_group, np.ndarray) and proto_group.size > 0:
+                            for vb in proto_group:
+                                cs = _cosine_sim(vb, det_vec)
+                                if cs is not None and cs > best_cs:
+                                    best_cs = cs
                     bank = s.get("emb_bank", None)
                     if isinstance(bank, list) and len(bank) > 0:
-                        best_cs = -1.0
                         for vb in bank:
                             cs = _cosine_sim(vb, det_vec)
                             if cs is not None and cs > best_cs:
                                 best_cs = cs
-                        emb_sim = best_cs if best_cs >= -0.5 else None
+                    if best_cs > -0.5:
+                        emb_sim = best_cs
                     else:
                         emb_sim = _cosine_sim(t_emb_surfer, det_vec)
             hist_sim = _hist_similarity(t_hist_surfer, det_hist_surfer) if APPEAR_ENABLE else None
@@ -1459,6 +1597,18 @@ def appearance_associate(
                 cost_debug_acc["hist_sum"] = cost_debug_acc.get("hist_sum", 0.0) + (
                     hist_sim if hist_sim is not None else 0.0)
                 cost_debug_acc["pairs"] = cost_debug_acc.get("pairs", 0.0) + 1.0
+
+    if TRANSFORMER_ASSOC_ENABLE and T > 0 and D > 0:
+        assoc_model = _get_transformer_assoc()
+        if assoc_model is not None:
+            try:
+                meta_pack = {"width": float(W), "height": float(H), "fps": float(fps)}
+                assoc_cost = assoc_model.compute_cost(track_pack, det_pack, meta_pack)
+                if assoc_cost is not None and assoc_cost.shape == cost[:T, :D].shape:
+                    blend = float(np.clip(getattr(assoc_model, 'weight', 0.5), 0.0, 1.0))
+                    cost[:T, :D] = blend * assoc_cost + (1.0 - blend) * cost[:T, :D]
+            except Exception:
+                pass
 
     # Solve assignment
     matches: List[Tuple[int, int]] = []
@@ -1678,6 +1828,21 @@ def appearance_associate(
                             emb_bank = emb_bank[-EMB_BANK_MAX:]
                     except Exception:
                         pass
+                    if _APPEAR_MEMORY is not None:
+                        try:
+                            side = float(min(db[2] - db[0], db[3] - db[1]))
+                        except Exception:
+                            side = 0.0
+                        quality = {
+                            "vis": float(t_vis) if t_vis is not None else 1.0,
+                            "min_side": max(0.0, side),
+                            "blur": float(s.get("last_blur", s.get("blur", 0.0))),
+                            "conf": float(conf_here),
+                        }
+                        try:
+                            _APPEAR_MEMORY.update(tid, e_now, quality)
+                        except Exception:
+                            pass
         # Count recovered if this track was missing
         if int(s.get("time_since_update", 0)) > 0:
             recovered_ids += 1
@@ -1917,6 +2082,24 @@ def appearance_associate(
         }
         assigned_ids[di] = int(next_tid)
         next_tid += 1
+
+    if _ASSOC_LOGGER is not None and T > 0 and D > 0:
+        try:
+            _ASSOC_LOGGER.log(
+                frame_idx=frame_idx,
+                track_ids=[int(tid) for tid, _ in tracks],
+                det_boxes=boxes,
+                track_features=track_feature_rows,
+                det_features=det_feature_rows,
+                cost_matrix=cost[:T, :D],
+                mask_matrix=masks[:T, :D],
+                assigned_track_ids=assigned_ids,
+                track_embeddings=track_emb_logger,
+                det_embeddings=det_emb_logger,
+                metadata={"width": float(W), "height": float(H), "fps": float(fps)},
+            )
+        except Exception:
+            pass
 
     return assigned_ids, new_state, next_tid, dropped_pairs, recovered_ids, id_switch_est
 

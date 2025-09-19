@@ -52,6 +52,7 @@ class ReIDExtractor:
     - dinov2_vits14: via timm ViT small dinov2 global pooled embedding.
     - dinov2_vitl14: via timm ViT large patch14 DINOv2.
     - clip_vitl14 / clip_vith14: via open_clip pretrained="openai".
+    - transreid_vitb16: ViT-Base TransReID style encoder via timm.
     - fusion: concat of CLIP-L/14 and DINOv2-L/14 (then optional PCA).
 
     The optional PCA cache is shared across instances and guarded by a
@@ -122,6 +123,8 @@ class ReIDExtractor:
                 self._load_dinov2_large(); load_ok = True
             elif self.backend in ("clip_vitl14", "clip_vith14"):
                 self._load_openclip(self.backend); load_ok = True
+            elif self.backend == "transreid_vitb16":
+                self._load_transreid_vit_base(); load_ok = True
             elif self.backend == "fusion":
                 # requires both CLIP-L/14 and DINOv2-L/14
                 self._load_fusion()
@@ -256,6 +259,22 @@ class ReIDExtractor:
             if last_err is None:
                 last_err = e
             raise RuntimeError("Failed to load DINOv2 ViT-L/14 via timm") from last_err
+
+    def _load_transreid_vit_base(self):
+        self.is_vit_square = True
+        self.input_size = (256, 256)
+        try:
+            import timm
+            try:
+                model = timm.create_model('transreid_vit_base_patch16_224', pretrained=True, num_classes=0)
+            except Exception:
+                model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=0)
+            model.eval().to(self.device)
+            self.model = model
+            if self.fp16 and self.device.type == "cuda":
+                self.model = self.model.half()
+        except Exception as e:
+            raise RuntimeError('Failed to load TransReID ViT-B/16 via timm') from e
 
     def _load_openclip(self, kind: str = "clip_vitl14"):
         self.is_vit_square = True
