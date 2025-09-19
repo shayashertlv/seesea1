@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 import numpy as np
 import math
 
@@ -34,6 +34,25 @@ class AppearanceMemory:
             if n > 1e-12:
                 return v / n
         return None
+
+    def get_group(self, track_id: int, limit: Optional[int] = None) -> Optional[np.ndarray]:
+        protos = self._protos.get(int(track_id), [])
+        if not protos:
+            base = self.get(track_id)
+            if base is None:
+                return None
+            return base.reshape(1, -1)
+        cap = limit if limit is not None else self.k_protos
+        vecs: List[np.ndarray] = []
+        for score, vec in protos[:max(1, cap)]:
+            if isinstance(vec, np.ndarray) and vec.size > 0:
+                vecs.append(vec.astype(np.float32))
+        if not vecs:
+            base = self.get(track_id)
+            if base is not None:
+                return base.reshape(1, -1)
+            return None
+        return np.stack(vecs, axis=0)
 
     def _quality_ok(self, q: Dict) -> bool:
         try:
