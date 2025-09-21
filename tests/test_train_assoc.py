@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import pytest
@@ -34,12 +35,11 @@ def _write_sample(path: Path, tracks: int, dets: int) -> None:
     )
 
 
-def test_train_assoc_supports_batch_sizes_above_one(tmp_path) -> None:
-    data_dir = tmp_path / "assoc"
+def _prepare_dataset(root: Path, specs: Sequence[tuple[int, int]] = ((1, 2),)) -> Path:
+    data_dir = root / "assoc"
     data_dir.mkdir()
     manifest = data_dir / "manifest.jsonl"
     entries = []
-    specs = [(1, 2), (2, 3), (3, 1)]
     for idx, (tracks, dets) in enumerate(specs):
         sample_path = data_dir / f"sample_{idx}.npz"
         _write_sample(sample_path, tracks=tracks, dets=dets)
@@ -47,6 +47,11 @@ def test_train_assoc_supports_batch_sizes_above_one(tmp_path) -> None:
     with manifest.open("w", encoding="utf-8") as fp:
         for entry in entries:
             fp.write(json.dumps(entry) + "\n")
+    return data_dir
+
+
+def test_train_assoc_supports_batch_sizes_above_one(tmp_path) -> None:
+    data_dir = _prepare_dataset(tmp_path, specs=[(1, 2), (2, 3), (3, 1)])
 
     output_path = tmp_path / "weights.pt"
     args = train_assoc.parse_args(
@@ -67,3 +72,20 @@ def test_train_assoc_supports_batch_sizes_above_one(tmp_path) -> None:
     train_assoc.train(args)
 
     assert output_path.exists()
+
+
+def test_train_assoc_inspect_mode_reports_dataset(tmp_path, capsys) -> None:
+    data_dir = _prepare_dataset(tmp_path, specs=[(2, 3)])
+
+    args = train_assoc.parse_args(
+        [
+            "--data",
+            str(data_dir),
+            "--inspect",
+        ]
+    )
+
+    train_assoc.train(args)
+
+    output = capsys.readouterr().out
+    assert "samples: 1" in output
