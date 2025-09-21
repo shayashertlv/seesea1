@@ -53,14 +53,14 @@ class AssociationLogger:
         indices: set[int] = set()
         manifest_indices: set[int] = set()
         filenames_by_index: dict[int, str] = {}
-        highest_index = -1
+        highest_index: Optional[int] = self._find_manifest_tail_index()
 
         def register_index(idx: Optional[int]) -> None:
             nonlocal highest_index
             if idx is None:
                 return
             indices.add(idx)
-            if idx > highest_index:
+            if highest_index is None or idx > highest_index:
                 highest_index = idx
 
         if self._manifest_path.exists():
@@ -100,8 +100,41 @@ class AssociationLogger:
             if idx not in manifest_indices
         ]
 
-        next_index = highest_index + 1 if highest_index >= 0 else 0
+        next_index = highest_index + 1 if highest_index is not None else 0
         return indices, next_index, missing_manifest_entries
+
+    def _find_manifest_tail_index(self) -> Optional[int]:
+        """Return the highest sample index recorded in the manifest tail."""
+
+        if not self._manifest_path.exists():
+            return None
+        try:
+            with open(self._manifest_path, "rb") as manifest:
+                manifest.seek(0, os.SEEK_END)
+                file_size = manifest.tell()
+                if file_size <= 0:
+                    return None
+
+                chunk_size = 4096
+                while file_size > 0:
+                    read_size = min(chunk_size, file_size)
+                    manifest.seek(-read_size, os.SEEK_END)
+                    data = manifest.read(read_size).decode("utf-8", errors="ignore")
+                    lines = [line.strip() for line in data.splitlines() if line.strip()]
+                    for line in reversed(lines):
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        idx = self._extract_index(entry.get("npz"))
+                        if idx is not None:
+                            return idx
+                    if read_size == file_size:
+                        break
+                    chunk_size = min(chunk_size * 2, file_size)
+        except OSError:
+            return None
+        return None
 
     @staticmethod
     def _extract_index(filename: Optional[str]) -> Optional[int]:
