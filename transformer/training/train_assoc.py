@@ -24,6 +24,15 @@ class Sample:
     labels: np.ndarray
 
 
+@dataclass
+class Batch:
+    track_features: np.ndarray
+    det_features: np.ndarray
+    labels: np.ndarray
+    track_mask: np.ndarray
+    det_mask: np.ndarray
+
+
 class AssociationDataset(Dataset[Sample]):
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -103,11 +112,36 @@ def build_loaders(dataset: AssociationDataset, val_split: float, batch_size: int
     train_ds = Subset(dataset, train_indices)
     val_ds = Subset(dataset, val_indices) if val_indices else Subset(dataset, train_indices[:1])
 
-    def collate(batch: Sequence[Sample]) -> Sample:
-        return batch[0]
+    def collate(batch: Sequence[Sample]) -> Batch:
+        if not batch:
+            raise ValueError("empty batch")
+        batch_size = len(batch)
+        track_dim = batch[0].track_features.shape[-1]
+        det_dim = batch[0].det_features.shape[-1]
+        track_counts = [sample.track_features.shape[0] for sample in batch]
+        det_counts = [sample.det_features.shape[0] for sample in batch]
+        max_tracks = max(track_counts) if track_counts else 0
+        max_dets = max(det_counts) if det_counts else 0
+        track_features = np.zeros((batch_size, max_tracks, track_dim), dtype=np.float32)
+        det_features = np.zeros((batch_size, max_dets, det_dim), dtype=np.float32)
+        labels = np.zeros((batch_size, max_tracks, max_dets), dtype=np.float32)
+        track_mask = np.zeros((batch_size, max_tracks), dtype=np.float32)
+        det_mask = np.zeros((batch_size, max_dets), dtype=np.float32)
+        for i, sample in enumerate(batch):
+            t_count = track_counts[i]
+            d_count = det_counts[i]
+            if t_count:
+                track_features[i, :t_count, :] = sample.track_features[:t_count, :]
+                track_mask[i, :t_count] = 1.0
+            if d_count:
+                det_features[i, :d_count, :] = sample.det_features[:d_count, :]
+                det_mask[i, :d_count] = 1.0
+            if t_count and d_count:
+                labels[i, :t_count, :d_count] = sample.labels[:t_count, :d_count]
+        return Batch(track_features, det_features, labels, track_mask, det_mask)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate)
     return train_loader, val_loader
 
 
@@ -129,16 +163,13 @@ def train(args: argparse.Namespace) -> None:
     if args.inspect:
         inspect_dataset(dataset)
         return
-    if args.batch_size != 1:
-        raise ValueError("Only batch_size=1 is currently supported")
-
     train_loader, val_loader = build_loaders(dataset, args.val_split, args.batch_size, args.seed)
 
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
     model = _AssociationBackbone(dataset.track_dim, dataset.det_dim, embed_dim=args.hidden_dim, nheads=args.heads, nlayers=args.layers)
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCEWithLogitsLoss(reduction="sum")
 
     best_val = math.inf
     best_state: Optional[Dict[str, torch.Tensor]] = None
@@ -150,10 +181,17 @@ def train(args: argparse.Namespace) -> None:
             tracks = torch.from_numpy(batch.track_features).to(device)
             dets = torch.from_numpy(batch.det_features).to(device)
             labels = torch.from_numpy(batch.labels).to(device)
+            track_mask = torch.from_numpy(batch.track_mask).to(device)
+            det_mask = torch.from_numpy(batch.det_mask).to(device)
             optimizer.zero_grad(set_to_none=True)
-            logits = model(tracks.unsqueeze(0), dets.unsqueeze(0)).squeeze(0)
-            loss = criterion(logits, labels)
-            loss.backward()
+            logits = model(tracks, dets)
+            valid = (track_mask.unsqueeze(-1) * det_mask.unsqueeze(1)) > 0.5
+            if valid.any():
+                valid_count = valid.float().sum().clamp_min(1.0)
+                loss = criterion(logits[valid], labels[valid]) / valid_count
+                loss.backward()
+            else:
+                loss = torch.zeros((), device=device)
             optimizer.step()
             total_loss += float(loss.item())
         avg_loss = total_loss / max(1, len(train_loader))
@@ -161,19 +199,25 @@ def train(args: argparse.Namespace) -> None:
         model.eval()
         val_loss = 0.0
         val_acc = 0.0
+        val_batches = 0
         with torch.no_grad():
             for batch in val_loader:
                 tracks = torch.from_numpy(batch.track_features).to(device)
                 dets = torch.from_numpy(batch.det_features).to(device)
                 labels = torch.from_numpy(batch.labels).to(device)
-                logits = model(tracks.unsqueeze(0), dets.unsqueeze(0)).squeeze(0)
-                loss = criterion(logits, labels)
-                val_loss += float(loss.item())
-                preds = (logits.sigmoid() >= 0.5).float()
-                if labels.numel() > 0:
-                    val_acc += float((preds == labels).float().mean().item())
-        val_loss /= max(1, len(val_loader))
-        val_acc /= max(1, len(val_loader))
+                track_mask = torch.from_numpy(batch.track_mask).to(device)
+                det_mask = torch.from_numpy(batch.det_mask).to(device)
+                logits = model(tracks, dets)
+                valid = (track_mask.unsqueeze(-1) * det_mask.unsqueeze(1)) > 0.5
+                if valid.any():
+                    valid_count = valid.float().sum().clamp_min(1.0)
+                    loss = criterion(logits[valid], labels[valid]) / valid_count
+                    val_loss += float(loss.item())
+                    preds = (logits.sigmoid() >= 0.5).float()
+                    val_acc += float((preds[valid] == labels[valid]).float().mean().item())
+                    val_batches += 1
+        val_loss /= max(1, val_batches)
+        val_acc /= max(1, val_batches)
         print(f"epoch {epoch:02d} | train_loss={avg_loss:.4f} val_loss={val_loss:.4f} val_acc={val_acc:.3f}")
         if val_loss < best_val:
             best_val = val_loss
