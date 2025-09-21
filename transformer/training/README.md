@@ -13,12 +13,15 @@ pip install -r requirements.txt
 
 ## 2. Launching a training run
 
+> **Limitation:** the current training script only supports a batch size of `1`.  Larger values will raise a
+> `ValueError` during collation.
+
 ```bash
 python -m transformer.training.train_assoc \
     --data /workspace/seesea1/artifacts/assoc_logs \
     --output /workspace/seesea1/weights/assoc_transformer.pt \
     --epochs 12 \
-    --batch-size 64 \
+    --batch-size 1 \
     --lr 1e-4
 ```
 
@@ -29,6 +32,19 @@ Key arguments:
 * `--val-split` – fraction of samples reserved for validation (default `0.1`).
 * `--device` – `cuda`, `cpu`, or `auto` (default `auto`).
 * `--inspect` – print dataset statistics and exit (no training).
+
+Smoke test the dataset by running the script in inspection mode.  This validates that the manifest and samples are readable
+before committing to a long training run:
+
+```bash
+python -m transformer.training.train_assoc \
+    --data /workspace/seesea1/artifacts/assoc_logs \
+    --output /tmp/assoc_transformer.pt \
+    --batch-size 1 \
+    --inspect
+```
+
+The command prints dataset statistics and exits successfully.
 
 The script reports loss curves and simple accuracy metrics every epoch.  Validation loss is used to keep the best checkpoint automatically.
 
