@@ -171,3 +171,33 @@ def test_logger_backfills_manifest_gaps(tmp_path: Path) -> None:
     with np.load(log_dir / "sample_0000001.npz") as data:
         metadata_one = json.loads(data["metadata"].item())
     assert metadata_one == {"run": 1}
+
+
+def test_logger_rebuilds_manifest_when_missing(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    first_logger = AssociationLogger(log_dir)
+    _log_dummy_sample(first_logger, metadata={"run": "initial"})
+    first_logger.close()
+
+    manifest_path = log_dir / "manifest.jsonl"
+    manifest_path.unlink()
+
+    resumed_logger = AssociationLogger(log_dir)
+    _log_dummy_sample(resumed_logger, metadata={"run": "resume"})
+    resumed_logger.close()
+
+    npz_files = sorted(p.name for p in log_dir.glob("sample_*.npz"))
+    assert npz_files == ["sample_0000000.npz", "sample_0000001.npz"]
+
+    manifest_entries = [
+        json.loads(line)["npz"]
+        for line in manifest_path.read_text().splitlines()
+        if line.strip()
+    ]
+    assert manifest_entries == ["sample_0000000.npz", "sample_0000001.npz"]
+
+    with np.load(log_dir / "sample_0000000.npz") as sample_zero:
+        metadata_zero = json.loads(sample_zero["metadata"].item())
+    assert metadata_zero == {"run": "initial"}
