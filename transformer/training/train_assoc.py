@@ -163,6 +163,8 @@ def train(args: argparse.Namespace) -> None:
     if args.inspect:
         inspect_dataset(dataset)
         return
+    if args.output is None:
+        raise SystemExit("--output is required when training; pass --output or use --inspect")
     train_loader, val_loader = build_loaders(dataset, args.val_split, args.batch_size, args.seed)
 
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -246,7 +248,11 @@ def train(args: argparse.Namespace) -> None:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=str, required=True, help="Directory containing manifest.jsonl and .npz samples")
-    parser.add_argument("--output", type=str, required=True, help="Path to save the trained checkpoint (.pt)")
+    parser.add_argument(
+        "--output",
+        type=str,
+        help="Path to save the trained checkpoint (.pt); optional with --inspect",
+    )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=1, help="Number of samples per optimizer step")
     parser.add_argument("--lr", type=float, default=1e-4)

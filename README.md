@@ -17,6 +17,12 @@ pipeline.
 python -m cli --log-level DEBUG
 ```
 
+To inspect the association training dataset without writing a checkpoint, run:
+
+```bash
+python -m transformer.training.train_assoc --data /path/to/dataset --inspect
+```
+
 ## Installation
 
 Install the minimal runtime dependencies before using the library:
