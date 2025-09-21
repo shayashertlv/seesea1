@@ -39,14 +39,14 @@ class AssociationLogger:
         self.max_embed_dim = max_embed_dim
         self._lock = threading.Lock()
         self._manifest_path = self.root / "manifest.jsonl"
-        self._counter = self._resume_counter()
+        self._used_indices, self._counter = self._resume_state()
         self._manifest_fp = open(self._manifest_path, "a", encoding="utf-8")
         atexit.register(self.close)
 
-    def _resume_counter(self) -> int:
-        """Return the next sample index based on existing files or manifest."""
+    def _resume_state(self) -> tuple[set[int], int]:
+        """Return previously used indices and the next index to be written."""
 
-        indices = set()
+        indices: set[int] = set()
         if self._manifest_path.exists():
             try:
                 with open(self._manifest_path, "r", encoding="utf-8") as manifest:
@@ -73,8 +73,8 @@ class AssociationLogger:
             # If the directory cannot be read we stick with the default counter.
             pass
         if not indices:
-            return 0
-        return max(indices) + 1
+            return indices, 0
+        return indices, max(indices) + 1
 
     @staticmethod
     def _extract_index(filename: Optional[str]) -> Optional[int]:
@@ -137,8 +137,12 @@ class AssociationLogger:
     def _write_sample(self, sample: AssociationSample) -> None:
         with self._lock:
             idx = self._counter
-            self._counter += 1
             sample_path = self.root / f"sample_{idx:07d}.npz"
+            while idx in self._used_indices or sample_path.exists():
+                idx += 1
+                sample_path = self.root / f"sample_{idx:07d}.npz"
+            self._counter = idx + 1
+            self._used_indices.add(idx)
             np.savez_compressed(
                 sample_path,
                 frame_idx=sample.frame_idx,
