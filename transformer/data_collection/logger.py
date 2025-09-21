@@ -4,6 +4,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,10 +38,55 @@ class AssociationLogger:
         self.root.mkdir(parents=True, exist_ok=True)
         self.max_embed_dim = max_embed_dim
         self._lock = threading.Lock()
-        self._counter = 0
         self._manifest_path = self.root / "manifest.jsonl"
+        self._counter = self._resume_counter()
         self._manifest_fp = open(self._manifest_path, "a", encoding="utf-8")
         atexit.register(self.close)
+
+    def _resume_counter(self) -> int:
+        """Return the next sample index based on existing files or manifest."""
+
+        indices = set()
+        if self._manifest_path.exists():
+            try:
+                with open(self._manifest_path, "r", encoding="utf-8") as manifest:
+                    for line in manifest:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        idx = self._extract_index(entry.get("npz"))
+                        if idx is not None:
+                            indices.add(idx)
+            except OSError:
+                # If the manifest cannot be read we simply fall back to scanning files.
+                pass
+        try:
+            for path in self.root.glob("sample_*.npz"):
+                idx = self._extract_index(path.name)
+                if idx is not None:
+                    indices.add(idx)
+        except OSError:
+            # If the directory cannot be read we stick with the default counter.
+            pass
+        if not indices:
+            return 0
+        return max(indices) + 1
+
+    @staticmethod
+    def _extract_index(filename: Optional[str]) -> Optional[int]:
+        if not filename:
+            return None
+        match = re.fullmatch(r"sample_(\d{7})\.npz", str(filename))
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
 
     def close(self) -> None:
         try:

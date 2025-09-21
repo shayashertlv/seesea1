@@ -1,5 +1,5 @@
-from __future__ import annotations
 """Utility helpers shared by transformer modules."""
+
 from __future__ import annotations
 
 from typing import Iterable, Optional, Sequence, Tuple
