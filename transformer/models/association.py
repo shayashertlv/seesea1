@@ -230,6 +230,51 @@ class TransformerAssociation:
             det_embeds_raw.append(det.get("embedding"))
         track_feats = np.asarray(track_rows, dtype=np.float32)
         det_feats = np.asarray(det_rows, dtype=np.float32)
+
+        track_embed_sizes = [int(vec.size) for vec in track_embeds_raw if isinstance(vec, np.ndarray) and vec.size > 0]
+        det_embed_sizes = [int(vec.size) for vec in det_embeds_raw if isinstance(vec, np.ndarray) and vec.size > 0]
+        incoming_embed_dim = 0
+        if track_embed_sizes or det_embed_sizes:
+            incoming_embed_dim = max(track_embed_sizes + det_embed_sizes)
+
+        checkpoint_embed_dim = int(self._meta.get("embed_dim", 0)) if self._meta else 0
+        if checkpoint_embed_dim <= 0:
+            checkpoint_embed_dim = 0
+
+        configured_embed_dim = self._configured_embed_dim or 0
+
+        if checkpoint_embed_dim and incoming_embed_dim and incoming_embed_dim != checkpoint_embed_dim:
+            raise ValueError(
+                "TransformerAssociation checkpoint expects"
+                f" {checkpoint_embed_dim}-dim embeddings, but runtime provided"
+                f" {incoming_embed_dim}. Ensure the ReID encoder and logging caps match the"
+                " checkpoint metadata."
+            )
+        if not checkpoint_embed_dim and configured_embed_dim and incoming_embed_dim and incoming_embed_dim != configured_embed_dim:
+            raise ValueError(
+                "TransformerAssociation configured for"
+                f" {configured_embed_dim}-dim embeddings via TRANSFORMER_ASSOC_EMBED_DIM,"
+                f" but runtime provided {incoming_embed_dim}. Adjust the cap or regenerate the"
+                " weights to match."
+            )
+
+        effective_embed_dim: Optional[int]
+        if checkpoint_embed_dim:
+            effective_embed_dim = checkpoint_embed_dim
+        elif configured_embed_dim:
+            effective_embed_dim = configured_embed_dim
+        elif self.max_embed_dim:
+            effective_embed_dim = (
+                max(int(self.max_embed_dim), incoming_embed_dim)
+                if incoming_embed_dim and incoming_embed_dim != self.max_embed_dim
+                else int(self.max_embed_dim)
+            )
+        elif incoming_embed_dim:
+            effective_embed_dim = incoming_embed_dim
+        else:
+            effective_embed_dim = None
+
+        self.max_embed_dim = effective_embed_dim if effective_embed_dim and effective_embed_dim > 0 else None
         track_embeds, _ = stack_embeddings(track_embeds_raw, self.max_embed_dim)
         det_embeds, _ = stack_embeddings(det_embeds_raw, self.max_embed_dim)
         track_feats = np.concatenate([track_feats, track_embeds], axis=1) if track_embeds.size else track_feats

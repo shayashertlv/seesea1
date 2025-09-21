@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -48,3 +49,32 @@ def test_transformer_association_derives_embed_dim(tmp_path, monkeypatch):
     assoc = TransformerAssociation(hidden_dim=32, nheads=2, nlayers=1, device="cpu")
     assoc.load(ckpt)
     assert assoc.max_embed_dim == 48
+
+
+def test_transformer_association_runtime_width_mismatch(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRANSFORMER_ASSOC_EMBED_DIM", raising=False)
+    ckpt = _write_checkpoint(tmp_path, embed_dim=64)
+    assoc = TransformerAssociation(hidden_dim=32, nheads=2, nlayers=1, device="cpu")
+    assoc.load(ckpt)
+    tracks = [
+        {
+            "pred_box": (0.0, 0.0, 10.0, 10.0),
+            "velocity": (0.0, 0.0),
+            "age": 5,
+            "time_since_update": 1,
+            "confidence": 0.9,
+            "visibility": 1.0,
+            "embedding": np.ones(32, dtype=np.float32),
+        }
+    ]
+    dets = [
+        {
+            "box": (0.0, 0.0, 10.0, 10.0),
+            "confidence": 0.9,
+            "visibility": 1.0,
+            "motion": (0.0, 0.0),
+            "embedding": np.ones(32, dtype=np.float32),
+        }
+    ]
+    with pytest.raises(ValueError, match="expects 64-dim"):
+        assoc.compute_cost(tracks, dets, {"width": 640.0, "height": 480.0})

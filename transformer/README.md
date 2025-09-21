@@ -26,9 +26,15 @@ The runtime tracker (`tracker.py`) already knows how to import the transformer m
 | --- | --- |
 | `TRANSFORMER_LOG_DIR` | Directory for collected association samples.  Creates `.npz` files + manifest. |
 | `TRANSFORMER_LOG_EMBED_DIM` | Optional cap on embedding dimensionality stored in each sample. |
+| `TRANSFORMER_ASSOC_EMBED_DIM` | Optional runtime cap for embeddings. Leave unset to use the checkpoint metadata automatically. |
 | `TRANSFORMER_ASSOC_ENABLE` | Enables transformer-based cost blending when set to `1`. |
 | `TRANSFORMER_ASSOC_WEIGHTS` | Path to a trained `*.pt` checkpoint produced by `train_assoc.py`. |
 | `TRANSFORMER_ASSOC_WEIGHT` | Blend factor between classical costs and transformer predictions (0–1 range). |
 | `APPEAR_MEMORY_ENABLE` | Keeps the transformer-aware appearance memory active. |
+
+When `TRANSFORMER_ASSOC_EMBED_DIM` is not provided the association loader reads the required embedding width from the checkpoint
+metadata and double-checks the tensors it receives at runtime.  Override the variable only when you need to clamp descriptors
+manually—any disagreement between the cap, the logged data, and the checkpoint now triggers a descriptive error so appearance
+information cannot be silently truncated.
 
 For a detailed walkthrough of the logging/training commands, see the dedicated READMEs in each subdirectory.
