@@ -56,10 +56,13 @@ class _AssociationBackbone(nn.Module):
 class TransformerAssociation:
     """Wrapper that loads weights and produces association cost matrices."""
 
+    _TRACK_STATIC_FEATURE_DIM = 10
+    _DET_STATIC_FEATURE_DIM = 8
+
     def __init__(
         self,
         device: Optional[str] = None,
-        max_embed_dim: int = 128,
+        max_embed_dim: Optional[int] = None,
         hidden_dim: int = 256,
         nheads: int = 4,
         nlayers: int = 2,
@@ -68,7 +71,8 @@ class TransformerAssociation:
         if not HAS_TORCH:
             raise RuntimeError("PyTorch is required for TransformerAssociation")
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        self.max_embed_dim = int(max_embed_dim)
+        self._configured_embed_dim = int(max_embed_dim) if max_embed_dim is not None else None
+        self.max_embed_dim: Optional[int] = self._configured_embed_dim
         self.hidden_dim = int(hidden_dim)
         self.nheads = int(nheads)
         self.nlayers = int(nlayers)
@@ -81,7 +85,8 @@ class TransformerAssociation:
     def from_env(cls) -> "TransformerAssociation":
         weight = float(os.getenv("TRANSFORMER_ASSOC_WEIGHT", "0.5"))
         device = os.getenv("TRANSFORMER_ASSOC_DEVICE", "auto")
-        max_embed_dim = int(os.getenv("TRANSFORMER_ASSOC_EMBED_DIM", "128"))
+        max_embed_env = os.getenv("TRANSFORMER_ASSOC_EMBED_DIM", "").strip()
+        max_embed_dim = int(max_embed_env) if max_embed_env else None
         hidden_dim = int(os.getenv("TRANSFORMER_ASSOC_HIDDEN", "256"))
         nheads = int(os.getenv("TRANSFORMER_ASSOC_HEADS", "4"))
         nlayers = int(os.getenv("TRANSFORMER_ASSOC_LAYERS", "2"))
@@ -102,11 +107,39 @@ class TransformerAssociation:
         det_dim = int(meta.get("det_dim", 0))
         if track_dim <= 0 or det_dim <= 0:
             raise ValueError("Invalid metadata in transformer association weights")
+        expected_embed = self._infer_embedding_dim(track_dim, det_dim)
+        if (
+            self._configured_embed_dim is not None
+            and expected_embed != self._configured_embed_dim
+        ):
+            raise ValueError(
+                "TransformerAssociation configured for"
+                f" {self._configured_embed_dim}-dim embeddings, but checkpoint"
+                f" expects {expected_embed}. Update TRANSFORMER_ASSOC_EMBED_DIM"
+                " to match the logger cap or retrain the model."
+            )
+        self.max_embed_dim = expected_embed if expected_embed > 0 else None
         self._ensure_model(track_dim, det_dim)
         self._model.load_state_dict(state["state_dict"])  # type: ignore[index]
         self._model.to(self.device)
-        self._meta = {"track_dim": track_dim, "det_dim": det_dim}
+        self._meta = {
+            "track_dim": track_dim,
+            "det_dim": det_dim,
+            "embed_dim": expected_embed,
+        }
         self._ready = True
+
+    @classmethod
+    def _infer_embedding_dim(cls, track_dim: int, det_dim: int) -> int:
+        track_embed = track_dim - cls._TRACK_STATIC_FEATURE_DIM
+        det_embed = det_dim - cls._DET_STATIC_FEATURE_DIM
+        if track_embed < 0 or det_embed < 0:
+            raise ValueError("Checkpoint metadata reports fewer static features than expected")
+        if track_embed != det_embed:
+            raise ValueError(
+                "Checkpoint metadata reports different embedding widths for tracks and detections"
+            )
+        return track_embed
 
     def _ensure_model(self, track_dim: int, det_dim: int) -> None:
         if self._model is None:
