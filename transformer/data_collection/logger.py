@@ -39,14 +39,20 @@ class AssociationLogger:
         self.max_embed_dim = max_embed_dim
         self._lock = threading.Lock()
         self._manifest_path = self.root / "manifest.jsonl"
-        self._used_indices, self._counter = self._resume_state()
+        self._used_indices, self._counter, pending_manifest_entries = self._resume_state()
         self._manifest_fp = open(self._manifest_path, "a", encoding="utf-8")
+        for entry in pending_manifest_entries:
+            self._manifest_fp.write(json.dumps({"npz": entry}) + "\n")
+        if pending_manifest_entries:
+            self._manifest_fp.flush()
         atexit.register(self.close)
 
-    def _resume_state(self) -> tuple[set[int], int]:
-        """Return previously used indices and the next index to be written."""
+    def _resume_state(self) -> tuple[set[int], int, list[str]]:
+        """Return used indices, the next index, and missing manifest entries."""
 
         indices: set[int] = set()
+        manifest_indices: set[int] = set()
+        filenames_by_index: dict[int, str] = {}
         highest_index = -1
 
         def register_index(idx: Optional[int]) -> None:
@@ -68,20 +74,34 @@ class AssociationLogger:
                             entry = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        register_index(self._extract_index(entry.get("npz")))
+                        idx = self._extract_index(entry.get("npz"))
+                        if idx is None:
+                            continue
+                        register_index(idx)
+                        manifest_indices.add(idx)
             except OSError:
                 # If the manifest cannot be read we simply fall back to scanning files.
                 pass
 
         try:
             for path in self.root.glob("sample_*.npz"):
-                register_index(self._extract_index(path.name))
+                idx = self._extract_index(path.name)
+                if idx is None:
+                    continue
+                register_index(idx)
+                filenames_by_index[idx] = path.name
         except OSError:
             # If the directory cannot be read we stick with the default counter.
             pass
 
+        missing_manifest_entries = [
+            filenames_by_index[idx]
+            for idx in sorted(filenames_by_index)
+            if idx not in manifest_indices
+        ]
+
         next_index = highest_index + 1 if highest_index >= 0 else 0
-        return indices, next_index
+        return indices, next_index, missing_manifest_entries
 
     @staticmethod
     def _extract_index(filename: Optional[str]) -> Optional[int]:
