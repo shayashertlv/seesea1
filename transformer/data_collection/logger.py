@@ -47,6 +47,16 @@ class AssociationLogger:
         """Return previously used indices and the next index to be written."""
 
         indices: set[int] = set()
+        highest_index = -1
+
+        def register_index(idx: Optional[int]) -> None:
+            nonlocal highest_index
+            if idx is None:
+                return
+            indices.add(idx)
+            if idx > highest_index:
+                highest_index = idx
+
         if self._manifest_path.exists():
             try:
                 with open(self._manifest_path, "r", encoding="utf-8") as manifest:
@@ -58,23 +68,20 @@ class AssociationLogger:
                             entry = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        idx = self._extract_index(entry.get("npz"))
-                        if idx is not None:
-                            indices.add(idx)
+                        register_index(self._extract_index(entry.get("npz")))
             except OSError:
                 # If the manifest cannot be read we simply fall back to scanning files.
                 pass
+
         try:
             for path in self.root.glob("sample_*.npz"):
-                idx = self._extract_index(path.name)
-                if idx is not None:
-                    indices.add(idx)
+                register_index(self._extract_index(path.name))
         except OSError:
             # If the directory cannot be read we stick with the default counter.
             pass
-        if not indices:
-            return indices, 0
-        return indices, max(indices) + 1
+
+        next_index = highest_index + 1 if highest_index >= 0 else 0
+        return indices, next_index
 
     @staticmethod
     def _extract_index(filename: Optional[str]) -> Optional[int]:

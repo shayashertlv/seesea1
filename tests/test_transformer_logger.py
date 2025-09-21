@@ -82,3 +82,26 @@ def test_logger_resume_creates_unique_filenames(tmp_path: Path) -> None:
     manifest_path = log_dir / "manifest.jsonl"
     lines = [line for line in manifest_path.read_text().splitlines() if line.strip()]
     assert len(lines) == 4
+
+
+def test_logger_second_run_appends_new_indices(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    first_logger = AssociationLogger(log_dir)
+    _log_dummy_sample(first_logger)
+    _log_dummy_sample(first_logger)
+    first_logger.close()
+
+    resumed_logger = AssociationLogger(log_dir)
+    _log_dummy_sample(resumed_logger)
+    _log_dummy_sample(resumed_logger)
+    resumed_logger.close()
+
+    npz_files = sorted(p.name for p in log_dir.glob("sample_*.npz"))
+    assert npz_files == [
+        "sample_0000000.npz",
+        "sample_0000001.npz",
+        "sample_0000002.npz",
+        "sample_0000003.npz",
+    ]
