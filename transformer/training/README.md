@@ -1,6 +1,6 @@
 # Training the Association Transformer
 
-Once you have collected association samples you can train (or fine-tune) the transformer-based cost head.  The `train_assoc.py` script handles dataset loading, batching, validation splits, and checkpoint export.
+Once you have collected association samples you can train (or fine-tune) the transformer-based cost head.  The `train_assoc.py` script handles dataset loading, batching (including minibatches), validation splits, and checkpoint export.
 
 ## 1. Installation
 
@@ -13,15 +13,12 @@ pip install -r requirements.txt
 
 ## 2. Launching a training run
 
-> **Limitation:** the current training script only supports a batch size of `1`.  Larger values will raise a
-> `ValueError` during collation.
-
 ```bash
 python -m transformer.training.train_assoc \
     --data /workspace/seesea1/artifacts/assoc_logs \
     --output /workspace/seesea1/weights/assoc_transformer.pt \
     --epochs 12 \
-    --batch-size 1 \
+    --batch-size 4 \
     --lr 1e-4
 ```
 
@@ -39,8 +36,6 @@ before committing to a long training run:
 ```bash
 python -m transformer.training.train_assoc \
     --data /workspace/seesea1/artifacts/assoc_logs \
-    --output /tmp/assoc_transformer.pt \
-    --batch-size 1 \
     --inspect
 ```
 
