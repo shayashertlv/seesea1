@@ -76,6 +76,37 @@ def test_train_assoc_supports_batch_sizes_above_one(tmp_path) -> None:
     assert output_path.exists()
 
 
+def test_train_assoc_cli_training_smoke(tmp_path) -> None:
+    data_dir = _prepare_dataset(tmp_path, specs=[(2, 2), (3, 1), (1, 4), (4, 3)])
+
+    output_path = tmp_path / "cli_weights.pt"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "transformer.training.train_assoc",
+            "--data",
+            str(data_dir),
+            "--output",
+            str(output_path),
+            "--epochs",
+            "1",
+            "--batch-size",
+            "4",
+            "--lr",
+            "1e-4",
+            "--device",
+            "cpu",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert output_path.exists()
+
+
 def test_train_assoc_inspect_mode_reports_dataset(tmp_path, capsys) -> None:
     data_dir = _prepare_dataset(tmp_path, specs=[(2, 3)])
 
