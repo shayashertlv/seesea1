@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -89,3 +91,23 @@ def test_train_assoc_inspect_mode_reports_dataset(tmp_path, capsys) -> None:
 
     output = capsys.readouterr().out
     assert "samples: 1" in output
+
+
+def test_train_assoc_cli_inspect_without_output(tmp_path) -> None:
+    data_dir = _prepare_dataset(tmp_path, specs=[(1, 1)])
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "transformer.training.train_assoc",
+            "--data",
+            str(data_dir),
+            "--inspect",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
