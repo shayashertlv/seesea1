@@ -85,6 +85,21 @@ def test_logger_resume_creates_unique_filenames(tmp_path: Path) -> None:
     assert len(lines) == 4
 
 
+def test_logger_sets_counter_to_next_unused_index(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    first_logger = AssociationLogger(log_dir)
+    _log_dummy_sample(first_logger)
+    first_logger.close()
+
+    resumed_logger = AssociationLogger(log_dir)
+    try:
+        assert resumed_logger._counter == 1  # type: ignore[attr-defined]
+    finally:
+        resumed_logger.close()
+
+
 def test_logger_second_run_appends_new_indices(tmp_path: Path) -> None:
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
