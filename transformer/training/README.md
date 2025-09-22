@@ -52,14 +52,15 @@ The script reports loss curves and simple accuracy metrics every epoch.  Validat
 export TRANSFORMER_ASSOC_ENABLE=1
 export TRANSFORMER_ASSOC_WEIGHTS="/workspace/seesea1/weights/assoc_transformer.pt"
 export TRANSFORMER_ASSOC_WEIGHT=0.5   # adjust blend factor if needed
-# optional: export TRANSFORMER_ASSOC_EMBED_DIM=256  # must match TRANSFORMER_LOG_EMBED_DIM if set
+# optional: export TRANSFORMER_ASSOC_EMBED_DIM=256  # override only when clamping descriptors manually
 ```
 
 At runtime the tracker will blend the learned association scores with the existing IoU/ReID/HSV costs.  Set `TRANSFORMER_ASSOC_WEIGHT` closer to `1.0` to rely more on the transformer or closer to `0.0` to favour the classical costs.
 
 > **Important:** the checkpoint stores the embedding width that was used during logging/training.  Leave
-> `TRANSFORMER_ASSOC_EMBED_DIM` unset (preferred) or set it to the same value as `TRANSFORMER_LOG_EMBED_DIM`.  A mismatch
-> now triggers a runtime error so the tracker cannot accidentally drop appearance information.
+> `TRANSFORMER_ASSOC_EMBED_DIM` unset (preferred) so the runtime can recover the width automatically from the checkpoint or
+> the observed tensors.  Override the variable only when you need to clamp descriptors manually—any disagreement between the
+> cap, the logged data, and the checkpoint now raises a runtime error so the tracker cannot silently drop appearance information.
 
 ## 4. Evaluation tips
 

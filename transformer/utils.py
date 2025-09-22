@@ -26,6 +26,10 @@ def stack_embeddings(
         if not isinstance(vec, np.ndarray) or vec.size == 0:
             continue
         flat = vec.astype(np.float32, copy=False).reshape(-1)
+        if max_dim is not None and flat.size > max_len:
+            raise ValueError(
+                f"received embedding with width {flat.size} but expected at most {max_len}"
+            )
         take = min(max_len, flat.size)
         out[i, :take] = flat[:take]
     return out, max_len

@@ -105,6 +105,15 @@ class TransformerAssociation:
         meta = state.get("meta", {})
         track_dim = int(meta.get("track_dim", 0))
         det_dim = int(meta.get("det_dim", 0))
+        state_dict = state.get("state_dict", {})
+        if track_dim <= 0 and isinstance(state_dict, dict):
+            tensor = state_dict.get("track_proj.weight")
+            if isinstance(tensor, torch.Tensor):
+                track_dim = int(tensor.size(1))
+        if det_dim <= 0 and isinstance(state_dict, dict):
+            tensor = state_dict.get("det_proj.weight")
+            if isinstance(tensor, torch.Tensor):
+                det_dim = int(tensor.size(1))
         if track_dim <= 0 or det_dim <= 0:
             raise ValueError("Invalid metadata in transformer association weights")
         expected_embed = self._infer_embedding_dim(track_dim, det_dim)
@@ -113,10 +122,10 @@ class TransformerAssociation:
             and expected_embed != self._configured_embed_dim
         ):
             raise ValueError(
-                "TransformerAssociation configured for"
-                f" {self._configured_embed_dim}-dim embeddings, but checkpoint"
-                f" expects {expected_embed}. Update TRANSFORMER_ASSOC_EMBED_DIM"
-                " to match the logger cap or retrain the model."
+                "TransformerAssociation configured for "
+                f"{self._configured_embed_dim}-dim embeddings, but checkpoint expects "
+                f"{expected_embed}. Update TRANSFORMER_ASSOC_EMBED_DIM to match the logger cap "
+                "or retrain the model."
             )
         self.max_embed_dim = expected_embed if expected_embed > 0 else None
         self._ensure_model(track_dim, det_dim)
@@ -275,8 +284,14 @@ class TransformerAssociation:
             effective_embed_dim = None
 
         self.max_embed_dim = effective_embed_dim if effective_embed_dim and effective_embed_dim > 0 else None
-        track_embeds, _ = stack_embeddings(track_embeds_raw, self.max_embed_dim)
-        det_embeds, _ = stack_embeddings(det_embeds_raw, self.max_embed_dim)
+        try:
+            track_embeds, _ = stack_embeddings(track_embeds_raw, self.max_embed_dim)
+            det_embeds, _ = stack_embeddings(det_embeds_raw, self.max_embed_dim)
+        except ValueError as exc:
+            raise ValueError(
+                "TransformerAssociation received embeddings wider than the configured cap. "
+                "Ensure TRANSFORMER_LOG_EMBED_DIM, TRANSFORMER_ASSOC_EMBED_DIM, and the checkpoint metadata match."
+            ) from exc
         track_feats = np.concatenate([track_feats, track_embeds], axis=1) if track_embeds.size else track_feats
         det_feats = np.concatenate([det_feats, det_embeds], axis=1) if det_embeds.size else det_feats
         if self._model is None:
