@@ -125,17 +125,17 @@ def build_loaders(dataset: AssociationDataset, val_split: float, batch_size: int
         track_features = np.zeros((batch_size, max_tracks, track_dim), dtype=np.float32)
         det_features = np.zeros((batch_size, max_dets, det_dim), dtype=np.float32)
         labels = np.zeros((batch_size, max_tracks, max_dets), dtype=np.float32)
-        track_mask = np.zeros((batch_size, max_tracks), dtype=np.float32)
-        det_mask = np.zeros((batch_size, max_dets), dtype=np.float32)
+        track_mask = np.zeros((batch_size, max_tracks), dtype=bool)
+        det_mask = np.zeros((batch_size, max_dets), dtype=bool)
         for i, sample in enumerate(batch):
             t_count = track_counts[i]
             d_count = det_counts[i]
             if t_count:
                 track_features[i, :t_count, :] = sample.track_features[:t_count, :]
-                track_mask[i, :t_count] = 1.0
+                track_mask[i, :t_count] = True
             if d_count:
                 det_features[i, :d_count, :] = sample.det_features[:d_count, :]
-                det_mask[i, :d_count] = 1.0
+                det_mask[i, :d_count] = True
             if t_count and d_count:
                 labels[i, :t_count, :d_count] = sample.labels[:t_count, :d_count]
         return Batch(track_features, det_features, labels, track_mask, det_mask)
@@ -186,10 +186,10 @@ def train(args: argparse.Namespace) -> None:
             track_mask = torch.from_numpy(batch.track_mask).to(device)
             det_mask = torch.from_numpy(batch.det_mask).to(device)
             optimizer.zero_grad(set_to_none=True)
-            logits = model(tracks, dets)
-            valid = (track_mask.unsqueeze(-1) * det_mask.unsqueeze(1)) > 0.5
+            logits = model(tracks, dets, track_mask=track_mask, det_mask=det_mask)
+            valid = track_mask.unsqueeze(-1) & det_mask.unsqueeze(1)
             if valid.any():
-                valid_count = valid.float().sum().clamp_min(1.0)
+                valid_count = valid.sum().clamp_min(1).to(dtype=logits.dtype)
                 loss = criterion(logits[valid], labels[valid]) / valid_count
                 loss.backward()
             else:
@@ -209,10 +209,10 @@ def train(args: argparse.Namespace) -> None:
                 labels = torch.from_numpy(batch.labels).to(device)
                 track_mask = torch.from_numpy(batch.track_mask).to(device)
                 det_mask = torch.from_numpy(batch.det_mask).to(device)
-                logits = model(tracks, dets)
-                valid = (track_mask.unsqueeze(-1) * det_mask.unsqueeze(1)) > 0.5
+                logits = model(tracks, dets, track_mask=track_mask, det_mask=det_mask)
+                valid = track_mask.unsqueeze(-1) & det_mask.unsqueeze(1)
                 if valid.any():
-                    valid_count = valid.float().sum().clamp_min(1.0)
+                    valid_count = valid.sum().clamp_min(1).to(dtype=logits.dtype)
                     loss = criterion(logits[valid], labels[valid]) / valid_count
                     val_loss += float(loss.item())
                     preds = (logits.sigmoid() >= 0.5).float()

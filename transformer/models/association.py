@@ -43,9 +43,30 @@ class _AssociationBackbone(nn.Module):
             nn.Linear(embed_dim, 1),
         )
 
-    def forward(self, track_feats: torch.Tensor, det_feats: torch.Tensor) -> torch.Tensor:
-        t = self.track_encoder(self.track_proj(track_feats))
-        d = self.det_encoder(self.det_proj(det_feats))
+    def forward(
+        self,
+        track_feats: torch.Tensor,
+        det_feats: torch.Tensor,
+        *,
+        track_mask: Optional[torch.Tensor] = None,
+        det_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        track_padding_mask: Optional[torch.Tensor] = None
+        if track_mask is not None:
+            track_padding_mask = ~track_mask.to(dtype=torch.bool, device=track_feats.device)
+
+        det_padding_mask: Optional[torch.Tensor] = None
+        if det_mask is not None:
+            det_padding_mask = ~det_mask.to(dtype=torch.bool, device=det_feats.device)
+
+        t = self.track_encoder(
+            self.track_proj(track_feats),
+            src_key_padding_mask=track_padding_mask,
+        )
+        d = self.det_encoder(
+            self.det_proj(det_feats),
+            src_key_padding_mask=det_padding_mask,
+        )
         t_expand = t.unsqueeze(2).expand(-1, -1, d.size(1), -1)
         d_expand = d.unsqueeze(1).expand(-1, t.size(1), -1, -1)
         pair = torch.cat([t_expand, d_expand], dim=-1)
