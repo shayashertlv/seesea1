@@ -58,9 +58,10 @@ export TRANSFORMER_ASSOC_WEIGHT=0.5   # adjust blend factor if needed
 At runtime the tracker will blend the learned association scores with the existing IoU/ReID/HSV costs.  Set `TRANSFORMER_ASSOC_WEIGHT` closer to `1.0` to rely more on the transformer or closer to `0.0` to favour the classical costs.
 
 > **Important:** the checkpoint stores the embedding width that was used during logging/training.  Leave
-> `TRANSFORMER_ASSOC_EMBED_DIM` unset (preferred) so the runtime can recover the width automatically from the checkpoint or
-> the observed tensors.  Override the variable only when you need to clamp descriptors manually—any disagreement between the
-> cap, the logged data, and the checkpoint now raises a runtime error so the tracker cannot silently drop appearance information.
+> `TRANSFORMER_ASSOC_EMBED_DIM` unset (preferred) so the runtime can recover the width automatically from the checkpoint
+> metadata or (if missing) by inspecting the projection tensors.  Override the variable only when you need to clamp
+> descriptors manually—any disagreement between the cap, the logged data, and the checkpoint now raises a runtime error so the
+> tracker cannot silently drop appearance information.
 
 ## 4. Evaluation tips
 

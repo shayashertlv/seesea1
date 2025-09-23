@@ -126,18 +126,44 @@ class TransformerAssociation:
         meta = state.get("meta", {})
         track_dim = int(meta.get("track_dim", 0))
         det_dim = int(meta.get("det_dim", 0))
+        embed_from_meta = int(meta.get("embed_dim", 0))
         state_dict = state.get("state_dict", {})
-        if track_dim <= 0 and isinstance(state_dict, dict):
-            tensor = state_dict.get("track_proj.weight")
-            if isinstance(tensor, torch.Tensor):
-                track_dim = int(tensor.size(1))
-        if det_dim <= 0 and isinstance(state_dict, dict):
-            tensor = state_dict.get("det_proj.weight")
-            if isinstance(tensor, torch.Tensor):
-                det_dim = int(tensor.size(1))
+        track_dim_from_weights = 0
+        det_dim_from_weights = 0
+        if isinstance(state_dict, dict):
+            track_tensor = state_dict.get("track_proj.weight")
+            if isinstance(track_tensor, torch.Tensor):
+                track_dim_from_weights = int(track_tensor.size(1))
+            det_tensor = state_dict.get("det_proj.weight")
+            if isinstance(det_tensor, torch.Tensor):
+                det_dim_from_weights = int(det_tensor.size(1))
+
+        if track_dim_from_weights and track_dim and track_dim_from_weights != track_dim:
+            raise ValueError(
+                "Checkpoint metadata track_dim does not match stored weights "
+                f"({track_dim} vs {track_dim_from_weights})."
+            )
+        if det_dim_from_weights and det_dim and det_dim_from_weights != det_dim:
+            raise ValueError(
+                "Checkpoint metadata det_dim does not match stored weights "
+                f"({det_dim} vs {det_dim_from_weights})."
+            )
+
+        track_dim = track_dim or track_dim_from_weights
+        det_dim = det_dim or det_dim_from_weights
+
         if track_dim <= 0 or det_dim <= 0:
             raise ValueError("Invalid metadata in transformer association weights")
-        expected_embed = self._infer_embedding_dim(track_dim, det_dim)
+
+        inferred_embed = self._infer_embedding_dim(track_dim, det_dim)
+        if embed_from_meta and inferred_embed and embed_from_meta != inferred_embed:
+            raise ValueError(
+                "Checkpoint metadata embed_dim disagrees with projected feature widths. "
+                f"Expected {inferred_embed} based on track/detection tensors but meta "
+                f"reported {embed_from_meta}."
+            )
+
+        expected_embed = embed_from_meta or inferred_embed
         if (
             self._configured_embed_dim is not None
             and expected_embed != self._configured_embed_dim
