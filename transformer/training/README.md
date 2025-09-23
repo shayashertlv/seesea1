@@ -25,7 +25,7 @@ python -m transformer.training.train_assoc \
 Key arguments:
 
 * `--data` – directory created by the logger (must contain `manifest.jsonl`).
-* `--output` – path for the `.pt` checkpoint (contains weights + metadata for runtime loading).
+* `--output` – path for the `.pt` checkpoint (contains weights + metadata for runtime loading). Skip this when running with `--inspect`.
 * `--val-split` – fraction of samples reserved for validation (default `0.1`).
 * `--device` – `cuda`, `cpu`, or `auto` (default `auto`).
 * `--inspect` – print dataset statistics and exit (no training).
