@@ -113,3 +113,34 @@ def test_transformer_association_runtime_wider_than_checkpoint(tmp_path, monkeyp
     ]
     with pytest.raises(ValueError, match="runtime provided 96"):
         assoc.compute_cost(tracks, dets, {"width": 640.0, "height": 480.0})
+
+
+def test_transformer_association_handles_wide_embeddings(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRANSFORMER_ASSOC_EMBED_DIM", raising=False)
+    ckpt = _write_checkpoint(tmp_path, embed_dim=192)
+    assoc = TransformerAssociation(hidden_dim=32, nheads=2, nlayers=1, device="cpu")
+    assoc.load(ckpt)
+    assert assoc.max_embed_dim == 192
+    tracks = [
+        {
+            "pred_box": (0.0, 0.0, 10.0, 10.0),
+            "velocity": (0.0, 0.0),
+            "age": 5,
+            "time_since_update": 1,
+            "confidence": 0.9,
+            "visibility": 1.0,
+            "embedding": np.ones(192, dtype=np.float32),
+        }
+    ]
+    dets = [
+        {
+            "box": (0.0, 0.0, 10.0, 10.0),
+            "confidence": 0.9,
+            "visibility": 1.0,
+            "motion": (0.0, 0.0),
+            "embedding": np.ones(192, dtype=np.float32),
+        }
+    ]
+    cost = assoc.compute_cost(tracks, dets, {"width": 640.0, "height": 480.0})
+    assert isinstance(cost, np.ndarray)
+    assert cost.shape == (1, 1)

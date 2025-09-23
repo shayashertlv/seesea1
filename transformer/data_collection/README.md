@@ -8,7 +8,7 @@ Set the following environment variables before launching `python -m cli` (or you
 
 ```bash
 export TRANSFORMER_LOG_DIR="/workspace/seesea1/artifacts/assoc_logs"
-export TRANSFORMER_LOG_EMBED_DIM=256        # optional cap; runtime loader enforces the same width automatically
+export TRANSFORMER_LOG_EMBED_DIM=256        # optional cap; runtime loader reads the width back from the checkpoint metadata
 export APPEAR_MEMORY_ENABLE=1               # enables prototype tracking for better labels
 ```
 
@@ -28,9 +28,10 @@ The `.npz` schema contains:
 * `track_features` – normalized geometry/motion features for each active track.
 * `det_features` – geometry + confidence/visibility for each detection.
 * `track_embeddings` / `det_embeddings` – padded appearance descriptors (zero when unavailable).  The width equals
-  `TRANSFORMER_LOG_EMBED_DIM` (or the uncapped ReID width when the variable is unset).  Training checkpoints embed the
-  value so the runtime association module can recover it automatically; any mismatch between logged tensors, the checkpoint,
-  or an explicit runtime cap now raises an informative error instead of silently truncating descriptors.
+  `TRANSFORMER_LOG_EMBED_DIM` (or the uncapped ReID width when the variable is unset).  Training checkpoints now embed the
+  recovered width, and the runtime association module falls back to the stored tensor shapes when metadata is missing. Any
+  mismatch between logged tensors, the checkpoint, or an explicit runtime cap raises an informative error instead of silently
+  truncating descriptors.
 * `cost_matrix` / `mask_matrix` – ByteTrack-style costs and gating masks prior to assignment.
 * `assigned_track_ids` – the tracker’s final decisions (track ID or `-1` when unmatched).
 
