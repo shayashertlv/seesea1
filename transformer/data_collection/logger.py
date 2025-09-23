@@ -100,26 +100,9 @@ class AssociationLogger:
             if idx not in manifest_indices
         ]
 
-        if not indices:
+        if highest_index is None:
             next_index = 0
         else:
-            next_index = 0
-            max_known = max(indices)
-            # Search for the first unused index starting from zero to keep
-            # filenames sequential and fill any gaps that may exist from
-            # partially-written runs.
-            while next_index <= max_known:
-                sample_path = self.root / f"sample_{next_index:07d}.npz"
-                if next_index not in indices and not sample_path.exists():
-                    break
-                next_index += 1
-            else:
-                next_index = max_known + 1
-
-        # Ensure the counter never regresses if the manifest tail contains a
-        # more recent entry than our directory scan (for example when files
-        # were moved after logging).
-        if highest_index is not None and next_index <= highest_index:
             next_index = highest_index + 1
 
         return indices, next_index, missing_manifest_entries

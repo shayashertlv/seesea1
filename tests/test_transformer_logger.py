@@ -157,6 +157,28 @@ def test_logger_resumes_without_overwriting_existing_samples(tmp_path: Path) -> 
     assert resumed_metadata == [{"run": "resume-1"}, {"run": "resume-2"}]
 
 
+def test_logger_reinstantiation_advances_index(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    first = AssociationLogger(log_dir)
+    _log_dummy_sample(first, metadata={"run": "first"})
+    first.close()
+
+    second = AssociationLogger(log_dir)
+    _log_dummy_sample(second, metadata={"run": "second"})
+    second.close()
+
+    npz_files = sorted(p.name for p in log_dir.glob("sample_*.npz"))
+    assert npz_files == ["sample_0000000.npz", "sample_0000001.npz"]
+
+    with np.load(log_dir / "sample_0000000.npz") as first_sample:
+        assert json.loads(first_sample["metadata"].item()) == {"run": "first"}
+
+    with np.load(log_dir / "sample_0000001.npz") as second_sample:
+        assert json.loads(second_sample["metadata"].item()) == {"run": "second"}
+
+
 def test_logger_backfills_manifest_gaps(tmp_path: Path) -> None:
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
