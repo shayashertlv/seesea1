@@ -118,6 +118,8 @@ def test_train_assoc_inspect_mode_reports_dataset(tmp_path, capsys) -> None:
         ]
     )
 
+    assert args.inspect is True
+    assert args.output is None
     train_assoc.train(args)
 
     output = capsys.readouterr().out

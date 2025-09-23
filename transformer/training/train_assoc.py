@@ -265,7 +265,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--inspect", action="store_true", help="Print dataset statistics and exit")
     args = parser.parse_args(argv)
-    if not args.inspect and args.output is None:
+    if args.inspect:
+        return args
+    if args.output is None:
         parser.error("--output is required unless --inspect is provided")
     return args
 
