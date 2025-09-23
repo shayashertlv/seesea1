@@ -123,6 +123,7 @@ TRACK_IOU = _cfg.track_iou
 TRANSFORMER_ASSOC_ENABLE = int(os.getenv("TRANSFORMER_ASSOC_ENABLE", "0")) == 1
 _TRANSFORMER_ASSOC = None
 _ASSOC_LOGGER = get_association_logger() if get_association_logger is not None else None
+_ASSOC_LOGGER_FAILURE_WARNED = False
 
 
 def _get_transformer_assoc():
@@ -1150,7 +1151,7 @@ def appearance_associate(
     dropped_pairs: List[Tuple[int, int]] where each pair is (track_id, age).
     Drop policy: tracks removed if time_since_update > BT_BUFFER.
     """
-    global _APPEAR_MEMORY, _ASSOC_LOGGER
+    global _APPEAR_MEMORY, _ASSOC_LOGGER, _ASSOC_LOGGER_FAILURE_WARNED
     num_dets = len(boxes)
     if num_dets == 0:
         # Increment time_since_update and drop expired
@@ -2099,7 +2100,15 @@ def appearance_associate(
                 metadata={"width": float(W), "height": float(H), "fps": float(fps)},
             )
         except Exception:
-            pass
+            if not _ASSOC_LOGGER_FAILURE_WARNED:
+                _ASSOC_LOGGER_FAILURE_WARNED = True
+                logger.exception(
+                    "Association logger failed while recording frame %s. "
+                    "This is often caused by TRANSFORMER_LOG_EMBED_DIM=%s being smaller than the embedding width. "
+                    "Further association logging errors will be suppressed.",
+                    frame_idx,
+                    os.getenv("TRANSFORMER_LOG_EMBED_DIM", "unset"),
+                )
 
     return assigned_ids, new_state, next_tid, dropped_pairs, recovered_ids, id_switch_est
 
