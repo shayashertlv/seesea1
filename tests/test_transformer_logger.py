@@ -1,12 +1,14 @@
 """Tests for the transformer association logger resume behaviour."""
 
-import json
-from pathlib import Path
 import importlib.util
+import json
+import logging
 import sys
 import types
+from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 def _get_association_logger() -> type:
@@ -238,3 +240,49 @@ def test_logger_rebuilds_manifest_when_missing(tmp_path: Path) -> None:
     with np.load(log_dir / "sample_0000000.npz") as sample_zero:
         metadata_zero = json.loads(sample_zero["metadata"].item())
     assert metadata_zero == {"run": "initial"}
+
+
+def test_logger_truncation_warns_once_and_marks_metadata(tmp_path: Path, caplog) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    logger = AssociationLogger(log_dir, max_embed_dim=1)
+    try:
+        with caplog.at_level(logging.WARNING):
+            with pytest.warns(RuntimeWarning):
+                logger.log(
+                    frame_idx=0,
+                    track_ids=[1],
+                    det_boxes=[[0.0, 0.0, 1.0, 1.0]],
+                    track_features=[[0.1]],
+                    det_features=[[0.2]],
+                    cost_matrix=np.zeros((1, 1), dtype=np.float32),
+                    mask_matrix=np.ones((1, 1), dtype=np.float32),
+                    assigned_track_ids=[1],
+                    track_embeddings=[np.arange(3, dtype=np.float32)],
+                    det_embeddings=[np.arange(2, dtype=np.float32)],
+                    metadata={"score": 5.0},
+                )
+            with pytest.warns(RuntimeWarning):
+                logger.log(
+                    frame_idx=1,
+                    track_ids=[2],
+                    det_boxes=[[0.0, 0.0, 1.0, 1.0]],
+                    track_features=[[0.3]],
+                    det_features=[[0.4]],
+                    cost_matrix=np.zeros((1, 1), dtype=np.float32),
+                    mask_matrix=np.ones((1, 1), dtype=np.float32),
+                    assigned_track_ids=[2],
+                    track_embeddings=[np.arange(4, dtype=np.float32)],
+                    det_embeddings=[np.arange(5, dtype=np.float32)],
+                    metadata={"score": 6.0},
+                )
+    finally:
+        logger.close()
+
+    truncation_logs = [msg for msg in caplog.messages if "Truncated association embeddings" in msg]
+    assert len(truncation_logs) == 1
+
+    with np.load(log_dir / "sample_0000000.npz") as sample:
+        metadata = json.loads(sample["metadata"].item())
+    assert metadata == {"score": 5.0, "embedding_truncated": 1.0}

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import os
 import re
 import threading
@@ -46,6 +47,7 @@ class AssociationLogger:
         if pending_manifest_entries:
             self._manifest_fp.flush()
         atexit.register(self.close)
+        self._truncation_warned = False
 
     def _resume_state(self) -> tuple[set[int], int, list[str]]:
         """Return used indices, the next index, and missing manifest entries."""
@@ -181,8 +183,19 @@ class AssociationLogger:
         det_rows = [tuple(row) for row in det_features]
         tf = pack_features(track_rows, len(track_rows[0]) if track_rows else 0)
         df = pack_features(det_rows, len(det_rows[0]) if det_rows else 0)
-        t_emb, _ = stack_embeddings(track_embeddings, self.max_embed_dim)
-        d_emb, _ = stack_embeddings(det_embeddings, self.max_embed_dim)
+        t_emb, _, t_truncated = stack_embeddings(track_embeddings, self.max_embed_dim)
+        d_emb, _, d_truncated = stack_embeddings(det_embeddings, self.max_embed_dim)
+        truncated = t_truncated or d_truncated
+        metadata_dict: Dict[str, float] = dict(metadata or {})
+        if truncated:
+            metadata_dict.setdefault("embedding_truncated", 1.0)
+            if not self._truncation_warned:
+                logging.getLogger(__name__).warning(
+                    "Truncated association embeddings to %s dimensions; increase "
+                    "TRANSFORMER_LOG_EMBED_DIM to capture the full width.",
+                    self.max_embed_dim,
+                )
+                self._truncation_warned = True
         sample = AssociationSample(
             frame_idx=frame_idx,
             track_ids=tracks,
@@ -194,7 +207,7 @@ class AssociationLogger:
             assigned_track_ids=assigned,
             track_embeddings=t_emb,
             det_embeddings=d_emb,
-            metadata=metadata or {},
+            metadata=metadata_dict,
         )
         self._write_sample(sample)
 
