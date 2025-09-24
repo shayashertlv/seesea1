@@ -331,14 +331,17 @@ class TransformerAssociation:
             effective_embed_dim = None
 
         self.max_embed_dim = effective_embed_dim if effective_embed_dim and effective_embed_dim > 0 else None
-        try:
-            track_embeds, _ = stack_embeddings(track_embeds_raw, self.max_embed_dim)
-            det_embeds, _ = stack_embeddings(det_embeds_raw, self.max_embed_dim)
-        except ValueError as exc:
+        track_embeds, _, track_truncated = stack_embeddings(
+            track_embeds_raw, self.max_embed_dim
+        )
+        det_embeds, _, det_truncated = stack_embeddings(
+            det_embeds_raw, self.max_embed_dim
+        )
+        if track_truncated or det_truncated:
             raise ValueError(
-                "TransformerAssociation received embeddings wider than the configured cap. "
-                "Ensure TRANSFORMER_LOG_EMBED_DIM, TRANSFORMER_ASSOC_EMBED_DIM, and the checkpoint metadata match."
-            ) from exc
+                "TransformerAssociation truncated embeddings wider than the configured cap. "
+                "Increase TRANSFORMER_LOG_EMBED_DIM/TRANSFORMER_ASSOC_EMBED_DIM or regenerate checkpoints to match."
+            )
         track_feats = np.concatenate([track_feats, track_embeds], axis=1) if track_embeds.size else track_feats
         det_feats = np.concatenate([det_feats, det_embeds], axis=1) if det_embeds.size else det_feats
         if self._model is None:
